@@ -5,7 +5,9 @@ name: Release
 #   2. Tag the merged commit on main and push only that tag:
 #      `git switch main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`
 # The release fails unless the tag is "v" + the Cargo.toml version, the tagged commit
-# is on main, and it passes the same checks as ci.yml.
+# is on main, and it passes the same checks as ci.yml. GitHub runs the release.yml
+# from the tagged commit, so a tag on a commit from before these checks, or on a commit
+# that edits this file, skips them. Use a tag ruleset to restrict who can create v* tags.
 on:
   push:
     tags: ["v*"]
