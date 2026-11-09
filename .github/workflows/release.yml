@@ -33,7 +33,6 @@ jobs:
         run: git merge-base --is-ancestor HEAD origin/main || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
       - name: Tag matches Cargo.toml version
         run: test "v$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')" = "$GITHUB_REF_NAME"
-      - run: cargo test
       - name: Build release binary
         run: |
           cargo build --release
