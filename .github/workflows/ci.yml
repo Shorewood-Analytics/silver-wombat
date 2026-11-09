@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # release.yml runs these same gates on the tagged commit before publishing.
+  workflow_call:
 
 permissions:
   contents: read
@@ -25,7 +27,11 @@ jobs:
           persist-credentials: false
       - name: No junk, databases or secrets committed
         run: |
-          bad=$(git ls-files | grep -Ei '(^|/)(\.DS_Store|\.env(\..+)?|[^/]+\.(db|sqlite3?|duckdb|pem|key|p12|pfx))$' | grep -v '\.env\.example$' || true)
+          # -z: without it git prints paths with non-ASCII, ", \ or control characters quoted, so `$` never matches.
+          # LC_ALL=C: match byte-wise, so names that are not valid UTF-8 are checked too.
+          # tr: one path per line, as before; a newline inside a path is shown as '?'.
+          export LC_ALL=C
+          bad=$(git ls-files -z | grep -zEi '(^|/)(\.DS_Store|\.env(\..+)?|\.netrc|credentials\.json|secrets\.[^/]+|[^/]+\.((db|sqlite3?)(-journal|-wal|-shm)?|duckdb(\.wal)?|mdb|accdb|dump|pgdump|pem|key|p12|pfx))$' | grep -zv '\.env\.example$' | tr '\0\n' '\n?' || true)
           if [ -n "$bad" ]; then echo "::error::remove from git: $bad"; exit 1; fi
 
   rust:

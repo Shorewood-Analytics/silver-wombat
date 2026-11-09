@@ -6,8 +6,7 @@ Closes #
 
 ## How to verify
 
-- [ ] `uv run ruff format --check && uv run ruff check`
-- [ ] `uv run pytest`
+- [ ] `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test`
 
 ## Notes
 

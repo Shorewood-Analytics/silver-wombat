@@ -1,6 +1,11 @@
 name: Release
 
-# Publish: push a tag, e.g. `git tag v0.1.1 && git push --tags`.
+# Publish:
+#   1. Set `version` in Cargo.toml to the new X.Y.Z and merge that to main.
+#   2. Tag the merged commit on main and push only that tag:
+#      `git switch main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`
+# The release fails unless the tag is "v" + the Cargo.toml version, the tagged commit
+# is on main, and it passes the same checks as ci.yml.
 on:
   push:
     tags: ["v*"]
@@ -9,7 +14,12 @@ permissions:
   contents: read
 
 jobs:
+  # ci.yml's repo, fmt, clippy and test gates, run on the tagged commit.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -19,6 +29,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Tagged commit is on main
+        run: git merge-base --is-ancestor HEAD origin/main || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
       - name: Tag matches Cargo.toml version
         run: test "v$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')" = "$GITHUB_REF_NAME"
       - run: cargo test
