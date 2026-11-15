@@ -15,6 +15,7 @@ pub mod fake;
 pub mod github;
 pub mod http;
 pub mod path;
+pub mod python;
 pub mod shell;
 
 pub mod workspace;

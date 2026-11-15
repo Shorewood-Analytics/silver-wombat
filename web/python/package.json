@@ -1,0 +1,11 @@
+{
+  "name": "silver-wombat-python",
+  "private": true,
+  "description": "The Python interpreters the site serves. Each is a Pyodide release; `cargo xtask dist` copies them into dist/python/. Keep in step with RUNTIMES in crates/core/src/python.rs.",
+  "dependencies": {
+    "py312": "npm:pyodide@0.27.7",
+    "py313": "npm:pyodide@0.29.5",
+    "py314": "npm:pyodide@314.0.8",
+    "py315": "npm:pyodide@315.0.0-alpha.2"
+  }
+}

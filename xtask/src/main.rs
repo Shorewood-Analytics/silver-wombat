@@ -154,9 +154,13 @@ fn dist(args: &[String]) -> Result<(), String> {
     let entries = fs::read_dir(&web).map_err(|error| format!("could not read web/: {error}"))?;
     for entry in entries {
         let entry = entry.map_err(|error| format!("could not read web/: {error}"))?;
+        if entry.path().is_dir() {
+            continue;
+        }
         fs::copy(entry.path(), out.join(entry.file_name()))
             .map_err(|error| format!("could not copy {}: {error}", entry.path().display()))?;
     }
+    python_runtimes(&root, &out)?;
 
     println!("dist/ is ready ({profile} profile):");
     let mut names: Vec<_> = fs::read_dir(&out)
@@ -175,6 +179,75 @@ fn dist(args: &[String]) -> Result<(), String> {
     println!(
         "Serve it with any static file server, for example: python3 -m http.server -d dist 8080"
     );
+    Ok(())
+}
+
+/// The files of a Pyodide release that a browser needs. Each release has one
+/// of the two `pyodide.asm` scripts.
+const PYTHON_FILES: [&str; 4] = [
+    "pyodide.mjs",
+    "pyodide.asm.wasm",
+    "python_stdlib.zip",
+    "pyodide-lock.json",
+];
+const PYTHON_SCRIPTS: [&str; 2] = ["pyodide.asm.js", "pyodide.asm.mjs"];
+
+/// The Python versions in `web/python/package.json`, as `(npm alias, folder)`:
+/// the alias `py312` is served from `python/3.12/`.
+fn python_versions(manifest: &str) -> Result<Vec<(String, String)>, String> {
+    let manifest: serde_json::Value = serde_json::from_str(manifest)
+        .map_err(|error| format!("web/python/package.json is not valid JSON: {error}"))?;
+    let dependencies = manifest["dependencies"]
+        .as_object()
+        .ok_or("web/python/package.json has no dependencies")?;
+    dependencies
+        .keys()
+        .map(|alias| {
+            alias
+                .strip_prefix("py3")
+                .filter(|minor| !minor.is_empty() && minor.chars().all(|c| c.is_ascii_digit()))
+                .map(|minor| (alias.clone(), format!("3.{minor}")))
+                .ok_or_else(|| {
+                    format!("web/python/package.json: {alias:?} is not named like py312")
+                })
+        })
+        .collect()
+}
+
+/// Copies the Python interpreters into `dist/python/<version>/`, installing
+/// them from npm first if they are not there yet.
+fn python_runtimes(root: &Path, out: &Path) -> Result<(), String> {
+    let source = root.join("web").join("python");
+    let manifest = fs::read_to_string(source.join("package.json"))
+        .map_err(|error| format!("could not read web/python/package.json: {error}"))?;
+    let versions = python_versions(&manifest)?;
+    let modules = source.join("node_modules");
+    if versions
+        .iter()
+        .any(|(alias, _)| !modules.join(alias).join("pyodide.mjs").exists())
+    {
+        run(Command::new("npm")
+            .args(["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix"])
+            .arg(&source))
+        .map_err(|error| {
+            format!("{error}\nThe Python interpreters come from npm (web/python/package.json); Node.js and npm are needed to build the site.")
+        })?;
+    }
+    for (alias, version) in versions {
+        let from = modules.join(&alias);
+        let to = out.join("python").join(&version);
+        fs::create_dir_all(&to)
+            .map_err(|error| format!("could not create {}: {error}", to.display()))?;
+        let scripts = PYTHON_SCRIPTS
+            .into_iter()
+            .filter(|name| from.join(name).exists());
+        let mut bytes = 0;
+        for name in PYTHON_FILES.into_iter().chain(scripts) {
+            bytes += fs::copy(from.join(name), to.join(name))
+                .map_err(|error| format!("could not copy {alias}/{name}: {error}"))?;
+        }
+        println!("  {bytes:>10} bytes  python/{version}/");
+    }
     Ok(())
 }
 

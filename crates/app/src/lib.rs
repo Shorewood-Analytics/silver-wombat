@@ -5,6 +5,7 @@
 mod ide;
 mod mirror;
 mod platform;
+mod python;
 mod theme;
 
 use std::borrow::Cow;

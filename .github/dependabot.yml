@@ -27,3 +27,14 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+  # The Python interpreters (Pyodide). A new version here must be matched in
+  # RUNTIMES in crates/core/src/python.rs; a test fails until it is.
+  - package-ecosystem: npm
+    directory: /web/python
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      python-runtimes:
+        patterns: ["*"]

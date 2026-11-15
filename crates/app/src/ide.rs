@@ -17,6 +17,7 @@ use silver_wombat_core::Error;
 use silver_wombat_core::fake::FakeGitHub;
 use silver_wombat_core::github::{GitHub, Repo};
 use silver_wombat_core::path;
+use silver_wombat_core::python::PythonTool;
 use silver_wombat_core::shell::Shell;
 use silver_wombat_core::workspace::{
     Change, ChangeKind, DirEntry, EntryKind, FileContent, SaveState, Workspace,
@@ -24,6 +25,7 @@ use silver_wombat_core::workspace::{
 
 use crate::mirror::{self, Action, Role};
 use crate::platform::{self, FetchHttp, Kept};
+use crate::python::WorkerPython;
 use crate::theme::{self, Look, MONO, SANS};
 
 const KEY_TOKEN: &str = "silver-wombat.token";
@@ -415,7 +417,7 @@ impl Ide {
                     }
                     this.work = Some(Work {
                         workspace: Rc::new(workspace),
-                        shell: Rc::new(Shell::new()),
+                        shell: Self::new_shell(window, cx),
                         dir: String::new(),
                         entries,
                         open: None,
@@ -618,6 +620,27 @@ impl Ide {
     }
 
     // ----- Terminal -----
+
+    /// A shell with Python in it. Notes from Python while it starts or loads a
+    /// library are printed to the terminal as they arrive.
+    fn new_shell(window: &mut Window, cx: &mut Context<Self>) -> Rc<Shell> {
+        let ide = cx.entity().downgrade();
+        let handle = window.window_handle();
+        let progress = Rc::new(move |note: &str| {
+            let line = format!("{note}\n");
+            let ide = ide.clone();
+            crate::with_app(|cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = ide.update(cx, |this, cx| this.print(&line, window, cx));
+                });
+            });
+        });
+        let shell = Shell::new();
+        shell.add_tool(Rc::new(PythonTool::new(Rc::new(WorkerPython::new(
+            progress,
+        )))));
+        Rc::new(shell)
+    }
 
     fn print(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(work) = &mut self.work else { return };

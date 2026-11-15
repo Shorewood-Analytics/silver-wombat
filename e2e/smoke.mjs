@@ -20,7 +20,13 @@ import { chromium } from "playwright-core";
 const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, "..", "dist");
 const axeSource = await readFile(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
-const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm" };
+const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".wasm": "application/wasm", ".json": "application/json" };
+
+// Python's libraries are downloaded from Pyodide's CDN when a program first
+// imports one. Where the CDN can be reached (CI), that is tested for real.
+// Where it cannot, the test checks that the terminal says so plainly.
+const CDN = "https://cdn.jsdelivr.net/pyodide/";
+const online = await fetch(`${CDN}v314.0.8/full/pyodide-lock.json`, { signal: AbortSignal.timeout(8_000) }).then((reply) => reply.ok).catch(() => false);
 
 const server = createServer(async (request, response) => {
   const path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname));
@@ -46,7 +52,10 @@ const browser = await chromium.launch({
 const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, hasTouch: true });
 const page = await context.newPage();
 const errors = [];
-page.on("console", (message) => message.type() === "error" && errors.push(message.text().slice(0, 300)));
+page.on("console", (message) => {
+  // A library download that fails is reported in the terminal and tested there.
+  if (message.type() === "error" && !message.location().url.startsWith(CDN)) errors.push(message.text().slice(0, 300));
+});
 page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 300)}`));
 
 let failures = 0;
@@ -155,9 +164,9 @@ try {
   await settle(1500);
   check(await hears("log", (text) => /^1$/m.test(text)), "the terminal sees the edit (grep -c printed 1)");
   check(await hears("log", (text) => text.includes("modified: app/main.py")), "git status lists the file as modified");
-  await typeInto("Command", "python app/main.py");
+  await typeInto("Command", "cargo build");
   await press("Run");
-  check(await hears("log", (text) => text.includes("python: not available")), "an unsupported program says it is not available");
+  check(await hears("log", (text) => text.includes("cargo: not available")), "an unsupported program says it is not available");
   await scan("terminal");
 
   // --- Changes: diff, commit ---
@@ -191,6 +200,45 @@ try {
   await press("Theme: Dark. Switch to Midnight");
   check(await eventually(async () => (await button("Theme: Midnight. Switch to Dark").count()) === 1), "the theme switches to Midnight");
   await scan("more");
+
+  // --- Python ---
+  await press("Terminal");
+  const runLine = async (line) => {
+    await typeInto("Command", line);
+    await press("Run");
+  };
+  const says = (needle, timeout = 90_000) => eventually(async () => (await heard("log")).some((text) => text.includes(needle)), timeout);
+  await runLine("clear");
+  await runLine("python -m app.main");
+  check(await says("Starting Python 3.14"), "the terminal says that Python is starting");
+  check(await says("Hello, world"), "python -m app.main runs the demo program");
+  await runLine(`python -c "import sys; open('made.txt', 'w').write('by python'); print('runs', sys.version.split()[0])" && cat made.txt`);
+  check(await says("runs 3.14.2"), "Python 3.14 runs (3.14.2)");
+  check((await says("by python")) && (await says("changed 1 file")), "a file written by a Python program is in the workspace and announced");
+  check(await waitForStatus("Saved on this device", 10_000), "and it is saved on the device like any other edit");
+  for (const [version, exact] of [["3.12", "3.12.7"], ["3.13", "3.13.2"], ["3.15", "3.15.0rc1"]]) {
+    await runLine(`uv python pin ${version} && python -c "import sys; print('runs', sys.version.split()[0])"`);
+    check(await says(`runs ${exact}`), `after uv python pin ${version}, Python ${version} runs (${exact})`);
+  }
+  await runLine("python -c 'while True: pass'");
+  await settle(2000);
+  await press("Stop");
+  check(await says("Stopped."), "Stop ends a Python program that would never finish");
+  await runLine("echo still here");
+  check(await says("still here"), "the terminal works after the stop");
+  if (online) {
+    for (const [version, numpy] of [["3.15", "2.4.3"], ["3.12", "2.0.2"], ["3.14", "2.4.6"]]) {
+      await runLine(`uv python pin ${version} && python -c "import numpy; print('numpy', numpy.__version__)"`);
+      check(await says(`numpy ${numpy}`, 180_000), `Python ${version} downloads numpy from the CDN on import (numpy ${numpy})`);
+    }
+    await runLine(`pip install cowsay && python -c "import cowsay; print('cowsay', 'imported')"`);
+    check(await says("cowsay imported", 180_000), "pip install fetches a pure-Python package from PyPI and Python imports it");
+  } else {
+    console.log("     (the Pyodide CDN is not reachable from here: library downloads are not tested, only the message)");
+    await runLine("python -c 'import numpy'");
+    check(await says("A library could not be downloaded"), "with no connection, a missing library is reported plainly");
+  }
+  await scan("terminal after Python");
 
   check(errors.length === 0, `no errors in the browser console${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
 } catch (error) {

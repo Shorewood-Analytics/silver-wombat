@@ -81,13 +81,21 @@ jobs:
       - run: cargo xtask dist
       - name: The site has every file it needs
         run: |
-          for file in index.html boot.js app.css silver_wombat_app.js silver_wombat_app_bg.wasm; do
+          for file in index.html boot.js app.css silver_wombat_app.js silver_wombat_app_bg.wasm python-worker.js; do
             test -s "dist/$file" || { echo "::error::dist/$file is missing or empty"; exit 1; }
           done
-          ls -l dist
+          for version in 3.12 3.13 3.14 3.15; do
+            for file in pyodide.mjs pyodide.asm.wasm python_stdlib.zip pyodide-lock.json; do
+              test -s "dist/python/$version/$file" || { echo "::error::dist/python/$version/$file is missing or empty"; exit 1; }
+            done
+          done
+          ls -l dist dist/python/*
+          du -sh dist
       # Starts the built site in Chrome and operates it through its
       # accessibility layer: demo repository, edit, save states, terminal,
-      # commit, reload recovery, keyboard, and an axe scan of every pane.
+      # commit, reload recovery, keyboard, an axe scan of every pane, and
+      # Python 3.12 to 3.15, including downloading numpy from Pyodide's CDN
+      # and a package from PyPI (so this step needs the network).
       - name: Run the site in a browser
         run: |
           npm ci --prefix e2e

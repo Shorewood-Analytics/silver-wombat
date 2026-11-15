@@ -303,7 +303,7 @@ impl FakeGitHub {
             "demo/hello-python",
             "main",
             &[
-                ("README.md", "# hello-python\n\nA tiny project to try the editor on.\nNothing here is saved to GitHub.\n"),
+                ("README.md", "# hello-python\n\nA tiny project to try the editor on.\nNothing here is saved to GitHub.\n\nIn the terminal, try:\n\n    python -m app.main\n"),
                 ("app/main.py", "from app.greet import greet\n\n\ndef main() -> None:\n    print(greet(\"world\"))\n\n\nif __name__ == \"__main__\":\n    main()\n"),
                 ("app/greet.py", "def greet(name: str) -> str:\n    return f\"Hello, {name}\"\n"),
                 ("app/__init__.py", ""),

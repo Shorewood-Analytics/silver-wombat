@@ -1,9 +1,10 @@
 //! The terminal's command language.
 //!
 //! This is a small shell that runs inside the browser against a
-//! [`Workspace`]. There is no machine behind it: `python`, `cargo` and the
-//! like do not exist here, and asking for them gets a plain "not available"
-//! answer rather than a pretend result.
+//! [`Workspace`]. There is no machine behind it: `cargo`, `npm` and the like
+//! do not exist here, and asking for them gets a plain "not available" answer
+//! rather than a pretend result. Programs that can run in a browser are added
+//! through [`External`]; Python is one (see [`crate::python`]).
 //!
 //! Supported syntax: words, `'single'` and `"double"` quotes, backslash
 //! escapes, `*` and `?` globs, pipes (`|`), `&&`, `;`, and `>` / `>>` to a
@@ -12,8 +13,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use crate::error::Error;
+use crate::http::LocalBoxFuture;
 use crate::path;
 use crate::workspace::{ChangeKind, EntryKind, FileContent, Workspace};
 
@@ -45,22 +48,57 @@ pub struct Completion {
     pub candidates: Vec<String>,
 }
 
-#[derive(Debug, Default)]
-struct Run {
-    out: String,
-    err: String,
-    code: i32,
+/// What one program produced.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ExternalRun {
+    /// Standard output: what a pipe or `>` receives.
+    pub out: String,
+    /// Messages for the person at the terminal.
+    pub err: String,
+    /// The exit status; 0 is success.
+    pub code: i32,
 }
 
-impl Run {
-    fn ok(out: impl Into<String>) -> Self {
+type Run = ExternalRun;
+
+/// What a program is told when it is run.
+#[derive(Clone, Copy)]
+pub struct Invocation<'a> {
+    /// The name it was called by.
+    pub program: &'a str,
+    pub args: &'a [String],
+    /// Text piped in from the command before it, if any.
+    pub stdin: Option<&'a str>,
+    /// The shell's current folder, relative to the repository root.
+    pub cwd: &'a str,
+    pub workspace: &'a Workspace,
+}
+
+/// A program the shell can run that is not built into it.
+pub trait External {
+    /// The names this answers to, with a short description of each.
+    fn programs(&self) -> &'static [(&'static str, &'static str)];
+
+    /// Runs it.
+    fn run<'a>(&'a self, invocation: Invocation<'a>) -> LocalBoxFuture<'a, ExternalRun>;
+
+    /// Asked to stop whatever it is running. The default does nothing.
+    fn stop(&self) {}
+}
+
+impl ExternalRun {
+    /// Success, with this standard output.
+    #[must_use]
+    pub fn ok(out: impl Into<String>) -> Self {
         Self {
             out: out.into(),
             ..Self::default()
         }
     }
 
-    fn fail(code: i32, err: impl Into<String>) -> Self {
+    /// Failure, with this message.
+    #[must_use]
+    pub fn fail(code: i32, err: impl Into<String>) -> Self {
         let mut err = err.into();
         if !err.ends_with('\n') {
             err.push('\n');
@@ -337,11 +375,21 @@ fn take_count(args: &mut Vec<String>, default: usize) -> Result<usize, String> {
 }
 
 /// The shell: a current folder and the session's history.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Shell {
     cwd: RefCell<String>,
     history: RefCell<Vec<String>>,
     stop: Cell<bool>,
+    tools: RefCell<Vec<Rc<dyn External>>>,
+}
+
+impl std::fmt::Debug for Shell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shell")
+            .field("cwd", &self.cwd)
+            .field("history", &self.history)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Shell {
@@ -349,6 +397,54 @@ impl Shell {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adds programs to this shell.
+    pub fn add_tool(&self, tool: Rc<dyn External>) {
+        self.tools.borrow_mut().push(tool);
+    }
+
+    fn tool_for(&self, program: &str) -> Option<Rc<dyn External>> {
+        self.tools
+            .borrow()
+            .iter()
+            .find(|tool| tool.programs().iter().any(|(name, _)| *name == program))
+            .cloned()
+    }
+
+    /// Every command name: built in, then added.
+    fn command_names(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = COMMANDS.iter().map(|(name, _)| *name).collect();
+        for tool in self.tools.borrow().iter() {
+            names.extend(tool.programs().iter().map(|(name, _)| *name));
+        }
+        names
+    }
+
+    fn help_text(&self) -> String {
+        let mut text = String::from(
+            "This terminal runs in your browser on the open repository. Nothing runs on a server.\n\n",
+        );
+        for (name, about) in COMMANDS {
+            let _ = writeln!(text, "  {name:<8} {about}");
+        }
+        let mut added = Vec::new();
+        for tool in self.tools.borrow().iter() {
+            for (name, about) in tool.programs() {
+                let _ = writeln!(text, "  {name:<8} {about}");
+                added.push(*name);
+            }
+        }
+        text.push_str(
+            "\nYou can chain with |, && and ; and write output to a file with > or >>.\nNot available: ",
+        );
+        let missing: Vec<&str> = ["python", "uv", "pip", "cargo", "npm", "node", "make"]
+            .into_iter()
+            .filter(|name| !added.contains(name))
+            .collect();
+        text.push_str(&missing.join(", "));
+        text.push_str(" and other programs that need a machine.\n");
+        text
     }
 
     /// The current folder (`""` is the repository root).
@@ -377,6 +473,9 @@ impl Shell {
     /// Asks the running command to stop at its next step.
     pub fn stop(&self) {
         self.stop.set(true);
+        for tool in self.tools.borrow().iter() {
+            tool.stop();
+        }
     }
 
     fn resolve(&self, input: &str) -> String {
@@ -521,7 +620,7 @@ impl Shell {
         output: &mut Output,
     ) -> Run {
         match name {
-            "help" => Run::ok(help_text()),
+            "help" => Run::ok(self.help_text()),
             "pwd" => Run::ok(format!("{}\n", path::display(&self.cwd()))),
             "cd" => self.cd(args, workspace).await,
             "ls" => self.ls(args, workspace).await,
@@ -563,6 +662,17 @@ impl Shell {
                 Err(error) => Run::from_error("whoami", &error),
             },
             "git" => self.git(args, workspace).await,
+            other if let Some(tool) = self.tool_for(other) => {
+                let cwd = self.cwd();
+                tool.run(Invocation {
+                    program: other,
+                    args,
+                    stdin: stdin.as_deref(),
+                    cwd: &cwd,
+                    workspace,
+                })
+                .await
+            }
             other if NOT_AVAILABLE.contains(&other) => Run::fail(
                 127,
                 format!(
@@ -1220,9 +1330,8 @@ impl Shell {
             .next_back()
             .is_none_or(|c| matches!(c, '|' | ';' | '&'));
         let mut candidates: Vec<String> = if is_command {
-            COMMANDS
-                .iter()
-                .map(|(name, _)| (*name).to_owned())
+            self.command_names()
+                .into_iter()
                 .filter(|name| name.starts_with(word))
                 .map(|name| format!("{name} "))
                 .collect()
@@ -1283,19 +1392,6 @@ impl Shell {
                 .collect(),
         }
     }
-}
-
-fn help_text() -> String {
-    let mut text = String::from(
-        "This terminal runs in your browser on the open repository. Nothing runs on a server.\n\n",
-    );
-    for (name, about) in COMMANDS {
-        let _ = writeln!(text, "  {name:<8} {about}");
-    }
-    text.push_str(
-        "\nYou can chain with |, && and ; and write output to a file with > or >>.\nNot available yet: python, uv, pip, cargo, npm and other programs.\n",
-    );
-    text
 }
 
 #[cfg(test)]

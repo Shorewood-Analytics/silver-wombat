@@ -38,6 +38,7 @@ web-sys = { version = "0.3", features = [
   "HtmlAnchorElement",
   "HtmlElement",
   "KeyboardEvent",
+  "MessageEvent",
   "Navigator",
   "Node",
   "Request",
@@ -49,5 +50,8 @@ web-sys = { version = "0.3", features = [
   "StorageManager",
   "Url",
   "Window",
+  "Worker",
+  "WorkerOptions",
+  "WorkerType",
   "WritableStream",
 ] }
