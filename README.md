@@ -73,6 +73,12 @@ python3 -m http.server -d dist 8080
 Then open <http://localhost:8080>. `dist/` is plain static files, so any static host works.
 For a faster, larger build while developing, use `cargo xtask dist --profile quick`.
 
+## Open it on a phone
+
+`.github/workflows/pages.yml` publishes the site to GitHub Pages each time `main` changes, after the same checks as a pull request.
+Pages has to be switched on once: **Settings > Pages > Build and deployment > Source: GitHub Actions**.
+The address is then <https://shorewood-analytics.github.io/silver-wombat/>. Until Pages is switched on the workflow does nothing.
+
 ## Host on ChatGPT Sites
 
 `dist` is one of the output folders Sites accepts for a static-only site.
