@@ -9,7 +9,6 @@ default-members = ["crates/core", "xtask"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-repository = "https://github.com/Shorewood-Analytics/silver-wombat"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

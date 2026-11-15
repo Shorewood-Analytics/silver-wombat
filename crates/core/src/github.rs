@@ -179,9 +179,11 @@ impl GitHub {
         if (200..300).contains(&response.status) {
             return Ok(response);
         }
-        let message = serde_json::from_str::<ErrorBody>(&response.body)
-            .map(|body| body.message)
-            .unwrap_or_default();
+        // GitHub explains most refusals in a JSON `message`; some have no body.
+        let message = match serde_json::from_str::<ErrorBody>(&response.body) {
+            Ok(body) => body.message,
+            Err(_) => String::new(),
+        };
         Err(match response.status {
             401 => Error::Unauthorized,
             403 | 429 if response.rate_limit_remaining == Some(0) => Error::RateLimited {
@@ -394,11 +396,10 @@ impl GitHub {
         Ok(entries
             .into_iter()
             .map(|entry| {
-                let (author, date) = entry
-                    .commit
-                    .author
-                    .map(|author| (author.name, author.date))
-                    .unwrap_or_default();
+                let (author, date) = match entry.commit.author {
+                    Some(author) => (author.name, author.date),
+                    None => (String::new(), String::new()),
+                };
                 LogEntry {
                     sha: entry.sha,
                     message: entry.commit.message,

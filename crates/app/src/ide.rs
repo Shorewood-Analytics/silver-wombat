@@ -717,7 +717,10 @@ impl Ide {
             (_, false) => None,
         };
         work.history_at = at;
-        let line = at.map(|index| history[index].clone()).unwrap_or_default();
+        let line = match at {
+            Some(index) => history[index].clone(),
+            None => String::new(),
+        };
         self.command_input
             .update(cx, |input, cx| input.set_value(line, window, cx));
     }
@@ -1025,11 +1028,10 @@ impl Ide {
     }
 
     fn repos_screen(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let login = self
-            .session
-            .as_ref()
-            .map(|session| session.login.clone())
-            .unwrap_or_default();
+        let login = match &self.session {
+            Some(session) => session.login.clone(),
+            None => String::new(),
+        };
         let rows: Vec<Div> = self
             .repos
             .iter()
@@ -1242,11 +1244,10 @@ impl Ide {
             )
         };
         // What a screen reader hears: the most recent output, not the whole scrollback.
-        let recent = self
-            .work
-            .as_ref()
-            .map(|work| tail(&work.terminal_text, 3000).to_owned())
-            .unwrap_or_default();
+        let recent = match &self.work {
+            Some(work) => tail(&work.terminal_text, 3000).to_owned(),
+            None => String::new(),
+        };
         v_flex()
             .size_full()
             .child(
@@ -1473,11 +1474,10 @@ impl Ide {
 
     fn more_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let demo = self.session.as_ref().is_some_and(|session| session.demo);
-        let login = self
-            .session
-            .as_ref()
-            .map(|session| session.login.clone())
-            .unwrap_or_default();
+        let login = match &self.session {
+            Some(session) => session.login.clone(),
+            None => String::new(),
+        };
         v_flex()
             .size_full()
             .p_4()

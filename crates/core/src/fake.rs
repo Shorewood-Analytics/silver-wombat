@@ -591,13 +591,11 @@ fn repo_route(
             let parents: Vec<String> = body
                 .get("parents")
                 .and_then(Value::as_array)
-                .map(|list| {
-                    list.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
             if parents.iter().any(|p| !repo.commits.contains_key(p)) {
                 return Err((422, "Parent SHA does not exist".to_owned()));
             }
