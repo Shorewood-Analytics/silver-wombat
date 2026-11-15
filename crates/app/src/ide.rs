@@ -10,8 +10,8 @@ use gpui_kit::component::input::{
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, Entity, SharedString, Subscription, Window, div, px,
-    relative,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, SharedString, Subscription,
+    Window, div, px, relative,
 };
 use silver_wombat_core::Error;
 use silver_wombat_core::fake::FakeGitHub;
@@ -22,6 +22,7 @@ use silver_wombat_core::workspace::{
     Change, ChangeKind, DirEntry, EntryKind, FileContent, SaveState, Workspace,
 };
 
+use crate::mirror::{self, Action, Role};
 use crate::platform::{self, FetchHttp};
 use crate::theme::{self, Look, MONO, SANS};
 
@@ -842,18 +843,119 @@ impl Ide {
     }
 
     // ----- Drawing -----
+    //
+    // Everything the person can tap, type into or read goes through `tap`,
+    // `field`, `code` or `say`, which draw it and also describe it to
+    // assistive technology (see `mirror.rs`).
 
-    fn button(
-        id: impl Into<gpui_kit::ElementId>,
-        label: impl Into<SharedString>,
+    fn tap(
         cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
-    ) -> Button {
-        Button::new(id)
-            .label(label)
+        tap: Tap,
+        on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Div {
+        let on = Rc::new(on);
+        let entity = cx.entity().downgrade();
+        let action: Action = {
+            let on = on.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                let _ = entity.update(cx, |this, cx| on(this, window, cx));
+            })
+        };
+        let mut button = Button::new(ElementId::Name(tap.key.clone().into()))
+            .label(tap.label.clone())
             .large()
-            .h(px(TAP))
-            .on_click(cx.listener(on_click))
+            .h(px(tap.height))
+            .disabled(tap.disabled)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| on(this, window, cx)));
+        button = match tap.kind {
+            Kind::Primary => button.primary(),
+            Kind::Ghost => button.ghost(),
+            Kind::Normal => button,
+        };
+        if let Some(current) = tap.current {
+            // The open pane is outlined, not only tinted, so it does not rely on colour.
+            button = button.compact().px_1().text_sm().toggled(current);
+            button = if current {
+                button.outline()
+            } else {
+                button.ghost()
+            };
+        }
+        if tap.fill {
+            button = button.w_full();
+        }
+        if tap.start {
+            button = button.justify_start();
+        }
+        let role = match tap.current {
+            Some(current) => Role::Tab { current },
+            None => Role::Button,
+        };
+        div()
+            .relative()
+            .when(tap.fill, |wrapper| wrapper.flex_1().min_w_0())
+            .child(button)
+            .child(mirror::mark(
+                tap.key,
+                role,
+                tap.label,
+                tap.disabled,
+                Some(action),
+            ))
+    }
+
+    fn field(key: &str, label: &str, state: &Entity<InputState>) -> Div {
+        let target = state.clone();
+        let action: Action = Rc::new(move |window: &mut Window, cx: &mut App| {
+            target.update(cx, |input, cx| input.focus(window, cx));
+        });
+        div()
+            .relative()
+            .child(Input::new(state).large().h(px(TAP)))
+            .child(mirror::mark(
+                key,
+                Role::TextField { multiline: false },
+                label,
+                false,
+                Some(action),
+            ))
+    }
+
+    /// An editor that fills the space it is given.
+    fn code(key: &str, label: String, state: &Entity<EditorState>, family: &'static str) -> Div {
+        let target = state.clone();
+        let action: Action = Rc::new(move |window: &mut Window, cx: &mut App| {
+            target.update(cx, |editor, cx| editor.focus(window, cx));
+        });
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                Editor::new(state)
+                    .aria_label(label.clone())
+                    .font_family(family)
+                    .line_height(relative(1.5))
+                    .h_full(),
+            )
+            .child(mirror::mark(
+                key,
+                Role::TextField { multiline: true },
+                label,
+                false,
+                Some(action),
+            ))
+    }
+
+    fn say(key: &str, role: Role, text: impl Into<SharedString>) -> Div {
+        let text: SharedString = text.into();
+        div().relative().child(text.clone()).child(mirror::mark(
+            key,
+            role,
+            text.to_string(),
+            false,
+            None,
+        ))
     }
 
     fn notice_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -867,14 +969,15 @@ impl Ide {
                 .border_1()
                 .border_color(cx.theme().border)
                 .rounded(cx.theme().radius)
-                .child(div().flex_1().child(text))
-                .child(
-                    Self::button("notice-dismiss", "Dismiss", cx, |this, _, _, cx| {
+                .child(Self::say("notice", Role::Status, text).flex_1())
+                .child(Self::tap(
+                    cx,
+                    Tap::new("notice-dismiss", "Dismiss").ghost(),
+                    |this, _, cx| {
                         this.notice = None;
                         cx.notify();
-                    })
-                    .ghost(),
-                )
+                    },
+                ))
                 .into_any_element(),
         )
     }
@@ -885,36 +988,39 @@ impl Ide {
             .size_full()
             .p_5()
             .gap_4()
-            .child(div().text_2xl().child("silver-wombat"))
-            .child("Edit a GitHub repository from this browser. Nothing is installed and there is no server.")
+            .child(Self::say("title", Role::Heading, "silver-wombat").text_2xl())
+            .child(Self::say(
+                "intro",
+                Role::Text,
+                "Edit a GitHub repository from this browser. Nothing is installed and there is no server.",
+            ))
             .children(self.notice_bar(cx))
             .child(
                 v_flex()
                     .gap_2()
                     .child("GitHub token")
-                    .child(Input::new(&self.token_input).large().h(px(TAP)))
-                    .child(
-                        Self::button(
-                            "sign-in",
-                            if self.busy { "Signing in…" } else { "Sign in" },
-                            cx,
-                            |this, _, window, cx| this.sign_in(window, cx),
-                        )
-                        .primary()
-                        .disabled(self.busy),
-                    ),
+                    .child(Self::field("token", "GitHub token", &self.token_input))
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("sign-in", if self.busy { "Signing in…" } else { "Sign in" })
+                            .primary()
+                            .disabled(self.busy),
+                        Self::sign_in,
+                    )),
             )
             .child(
-                div().text_color(muted).child(
+                Self::say(
+                    "token-help",
+                    Role::Text,
                     "Use a fine-grained personal access token with Contents: Read and write on the repositories you want to edit. It is kept in this browser's storage on this device and sent only to api.github.com.",
-                ),
+                )
+                .text_color(muted),
             )
-            .child(
-                Self::button("demo", "Try the demo (no account)", cx, |this, _, window, cx| {
-                    this.start_demo(window, cx);
-                })
-                .disabled(self.busy),
-            )
+            .child(Self::tap(
+                cx,
+                Tap::new("demo", "Try the demo (no account)").disabled(self.busy),
+                Self::start_demo,
+            ))
             .into_any_element()
     }
 
@@ -924,7 +1030,7 @@ impl Ide {
             .as_ref()
             .map(|session| session.login.clone())
             .unwrap_or_default();
-        let rows: Vec<AnyElement> = self
+        let rows: Vec<Div> = self
             .repos
             .iter()
             .enumerate()
@@ -936,11 +1042,15 @@ impl Ide {
                 } else {
                     repo.full_name.clone()
                 };
-                Self::button(("repo", index), label, cx, move |this, _, window, cx| {
-                    this.open_repo(full_name.clone(), branch.clone(), window, cx);
-                })
-                .disabled(self.busy)
-                .into_any_element()
+                Self::tap(
+                    cx,
+                    Tap::new(format!("repo-{index}"), label)
+                        .start()
+                        .disabled(self.busy),
+                    move |this, window, cx| {
+                        this.open_repo(full_name.clone(), branch.clone(), window, cx);
+                    },
+                )
             })
             .collect();
         v_flex()
@@ -952,16 +1062,14 @@ impl Ide {
                     .gap_2()
                     .items_center()
                     .child(
-                        div()
+                        Self::say("title", Role::Heading, format!("Repositories of {login}"))
                             .flex_1()
-                            .text_xl()
-                            .child(format!("Repositories of {login}")),
+                            .text_xl(),
                     )
-                    .child(Self::button(
-                        "sign-out",
-                        "Sign out",
+                    .child(Self::tap(
                         cx,
-                        |this, _, window, cx| {
+                        Tap::new("sign-out", "Sign out"),
+                        |this, window, cx| {
                             this.sign_out(window, cx);
                         },
                     )),
@@ -971,23 +1079,24 @@ impl Ide {
                 h_flex()
                     .gap_2()
                     .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&self.repo_input).large().h(px(TAP))),
+                        Self::field("repo-name", "Repository, as owner/name", &self.repo_input)
+                            .flex_1(),
                     )
-                    .child(
-                        Self::button("open-typed", "Open", cx, |this, _, window, cx| {
-                            this.open_typed_repo(window, cx);
-                        })
-                        .primary()
-                        .disabled(self.busy),
-                    ),
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("open-typed", "Open").primary().disabled(self.busy),
+                        Self::open_typed_repo,
+                    )),
             )
-            .child(if self.busy {
-                "Working…"
-            } else {
-                "Most recently pushed first."
-            })
+            .child(Self::say(
+                "repo-hint",
+                Role::Status,
+                if self.busy {
+                    "Working…"
+                } else {
+                    "Most recently pushed first."
+                },
+            ))
             .child(
                 v_flex()
                     .id("repo-list")
@@ -1004,15 +1113,14 @@ impl Ide {
             return div().into_any_element();
         };
         let dir = work.dir.clone();
-        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut rows: Vec<Div> = Vec::new();
         if !dir.is_empty() {
             let parent = path::parent(&dir).to_owned();
-            rows.push(
-                Self::button("dir-up", "Up one folder", cx, move |this, _, window, cx| {
-                    this.open_dir(parent.clone(), window, cx);
-                })
-                .into_any_element(),
-            );
+            rows.push(Self::tap(
+                cx,
+                Tap::new("dir-up", "Up one folder").start(),
+                move |this, window, cx| this.open_dir(parent.clone(), window, cx),
+            ));
         }
         for (index, entry) in work.entries.iter().enumerate() {
             let full = path::join(&dir, &entry.name);
@@ -1022,38 +1130,48 @@ impl Ide {
                 Some(ChangeKind::Deleted) => "  (deleted)",
                 None => "",
             };
-            let is_open = work.open.as_deref() == Some(full.as_str());
-            let button = match entry.kind {
-                EntryKind::Dir => Self::button(
-                    ("entry", index),
-                    format!("{}/{mark}", entry.name),
+            let key = format!("entry-{index}");
+            rows.push(match entry.kind {
+                EntryKind::Dir => Self::tap(
                     cx,
-                    move |this, _, window, cx| this.open_dir(full.clone(), window, cx),
+                    Tap::new(key, format!("Folder {}{mark}", entry.name)).start(),
+                    move |this, window, cx| this.open_dir(full.clone(), window, cx),
                 ),
-                EntryKind::File | EntryKind::Symlink => Self::button(
-                    ("entry", index),
-                    format!("{}{mark}", entry.name),
+                EntryKind::File | EntryKind::Symlink => {
+                    let is_open = work.open.as_deref() == Some(full.as_str());
+                    let label = if is_open {
+                        format!("{}{mark}  (open)", entry.name)
+                    } else {
+                        format!("{}{mark}", entry.name)
+                    };
+                    Self::tap(
+                        cx,
+                        Tap::new(key, label).ghost().start(),
+                        move |this, window, cx| {
+                            this.open_file(full.clone(), window, cx);
+                        },
+                    )
+                }
+                EntryKind::Submodule => Self::tap(
                     cx,
-                    move |this, _, window, cx| this.open_file(full.clone(), window, cx),
-                )
-                .ghost()
-                .toggled(is_open),
-                EntryKind::Submodule => Button::new(("entry", index))
-                    .label(format!("{} (submodule)", entry.name))
-                    .large()
-                    .h(px(TAP))
-                    .disabled(true),
-            };
-            rows.push(button.justify_start().into_any_element());
+                    Tap::new(key, format!("{} (submodule, cannot be opened)", entry.name))
+                        .start()
+                        .disabled(true),
+                    |_, _, _| {},
+                ),
+            });
         }
         v_flex()
             .size_full()
             .p_3()
             .gap_2()
             .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("Folder {}", path::display(&dir))),
+                Self::say(
+                    "folder",
+                    Role::Section,
+                    format!("Folder {}", path::display(&dir)),
+                )
+                .text_color(cx.theme().muted_foreground),
             )
             .child(
                 v_flex()
@@ -1075,12 +1193,11 @@ impl Ide {
                 .size_full()
                 .p_5()
                 .gap_3()
-                .child("No file is open.")
-                .child(Self::button(
-                    "go-files",
-                    "Choose a file",
+                .child(Self::say("no-file", Role::Text, "No file is open."))
+                .child(Self::tap(
                     cx,
-                    |this, _, _, cx| {
+                    Tap::new("go-files", "Choose a file"),
+                    |this, _, cx| {
                         this.pane = Pane::Files;
                         cx.notify();
                     },
@@ -1100,37 +1217,56 @@ impl Ide {
                     .gap_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().child(path::display(&file)))
-                    .child(div().text_color(cx.theme().muted_foreground).child(state)),
+                    .child(Self::say("file-name", Role::Section, path::display(&file)).flex_1())
+                    .child(
+                        Self::say("file-state", Role::Status, state)
+                            .text_color(cx.theme().muted_foreground),
+                    ),
             )
-            .child(
-                div().flex_1().min_h_0().child(
-                    Editor::new(&self.editor)
-                        .aria_label(format!("Code editor, {}", path::display(&file)))
-                        .font_family(if self.mono { MONO } else { SANS })
-                        .line_height(relative(1.5))
-                        .h_full(),
-                ),
-            )
+            .child(Self::code(
+                "editor",
+                format!("Code editor, {}", path::display(&file)),
+                &self.editor,
+                if self.mono { MONO } else { SANS },
+            ))
             .into_any_element()
     }
 
     fn terminal_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let quick = |id: &'static str, label: &'static str, cx: &mut Context<Self>| {
-            Self::button(id, label, cx, move |this, _, window, cx| {
-                this.run_command(label.to_owned(), window, cx);
-            })
-            .disabled(self.busy)
+        let busy = self.busy;
+        let quick = |key: &'static str, label: &'static str, cx: &mut Context<Self>| {
+            Self::tap(
+                cx,
+                Tap::new(key, format!("Run {label}")).disabled(busy),
+                move |this, window, cx| this.run_command(label.to_owned(), window, cx),
+            )
         };
+        // What a screen reader hears: the most recent output, not the whole scrollback.
+        let recent = self
+            .work
+            .as_ref()
+            .map(|work| tail(&work.terminal_text, 3000).to_owned())
+            .unwrap_or_default();
         v_flex()
             .size_full()
             .child(
-                div().flex_1().min_h_0().child(
-                    Editor::new(&self.terminal)
-                        .aria_label("Terminal output")
-                        .line_height(relative(1.5))
-                        .h_full(),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        Editor::new(&self.terminal)
+                            .aria_label("Terminal output")
+                            .line_height(relative(1.5))
+                            .h_full(),
+                    )
+                    .child(mirror::mark(
+                        "terminal-output",
+                        Role::Log,
+                        recent,
+                        false,
+                        None,
+                    )),
             )
             .child(
                 v_flex()
@@ -1141,46 +1277,41 @@ impl Ide {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child(Input::new(&self.command_input).large().h(px(TAP))),
-                            )
-                            .child(
-                                Self::button(
-                                    "run",
-                                    if self.busy { "Running…" } else { "Run" },
-                                    cx,
-                                    |this, _, window, cx| this.run_typed_command(window, cx),
-                                )
-                                .primary()
-                                .disabled(self.busy),
-                            ),
+                            .child(Self::field("command", "Command", &self.command_input).flex_1())
+                            .child(Self::tap(
+                                cx,
+                                Tap::new("run", if busy { "Running…" } else { "Run" })
+                                    .primary()
+                                    .disabled(busy),
+                                Self::run_typed_command,
+                            )),
                     )
                     .child(
                         h_flex()
                             .gap_2()
                             .flex_wrap()
-                            .child(Self::button(
-                                "complete",
-                                "Complete",
+                            .child(Self::tap(
                                 cx,
-                                |this, _, window, cx| {
+                                Tap::new("complete", "Complete"),
+                                |this, window, cx| {
                                     this.complete_command(window, cx);
                                 },
                             ))
-                            .child(Self::button(
-                                "previous",
-                                "Previous",
+                            .child(Self::tap(
                                 cx,
-                                |this, _, window, cx| {
+                                Tap::new("previous", "Previous"),
+                                |this, window, cx| {
                                     this.recall(true, window, cx);
                                 },
                             ))
-                            .child(Self::button("next", "Next", cx, |this, _, window, cx| {
-                                this.recall(false, window, cx);
-                            }))
-                            .child(Self::button("stop", "Stop", cx, |this, _, _, _| {
+                            .child(Self::tap(
+                                cx,
+                                Tap::new("next", "Next"),
+                                |this, window, cx| {
+                                    this.recall(false, window, cx);
+                                },
+                            ))
+                            .child(Self::tap(cx, Tap::new("stop", "Stop"), |this, _, _| {
                                 if let Some(work) = &this.work {
                                     work.shell.stop();
                                 }
@@ -1199,6 +1330,7 @@ impl Ide {
             ChangeKind::Modified => "Edited",
             ChangeKind::Deleted => "Deleted",
         };
+        let shown = path::display(&change.path);
         let for_diff = change.path.clone();
         let for_discard = change.path.clone();
         v_flex()
@@ -1207,29 +1339,59 @@ impl Ide {
             .border_1()
             .border_color(cx.theme().border)
             .rounded(cx.theme().radius)
-            .child(format!("{kind}: {}", path::display(&change.path)))
-            .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(change.state.label()),
-            )
+            .child(Self::say(
+                &format!("change-{index}"),
+                Role::Text,
+                format!("{kind}: {shown}. {}.", change.state.label()),
+            ))
             .child(
                 h_flex()
                     .gap_2()
-                    .child(Self::button(
-                        ("diff", index),
-                        "Show diff",
+                    .child(Self::tap(
                         cx,
-                        move |this, _, window, cx| this.show_diff(for_diff.clone(), window, cx),
+                        Tap::new(format!("diff-{index}"), format!("Show diff of {shown}")),
+                        move |this, window, cx| this.show_diff(for_diff.clone(), window, cx),
                     ))
-                    .child(Self::button(
-                        ("discard", index),
-                        "Discard",
+                    .child(Self::tap(
                         cx,
-                        move |this, _, window, cx| this.discard(for_discard.clone(), window, cx),
+                        Tap::new(
+                            format!("discard-{index}"),
+                            format!("Discard change to {shown}"),
+                        ),
+                        move |this, window, cx| this.discard(for_discard.clone(), window, cx),
                     )),
             )
             .into_any_element()
+    }
+
+    fn diff_view(&self, file: &str, cx: &mut Context<Self>) -> Div {
+        // What a screen reader hears: the end of the diff, not all of it.
+        let heard = tail(&self.diff.read(cx).value(), 3000).to_owned();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_1()
+            .child(
+                Self::say(
+                    "diff-title",
+                    Role::Section,
+                    format!("Diff of {}", path::display(file)),
+                )
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        Editor::new(&self.diff)
+                            .aria_label("Diff")
+                            .line_height(relative(1.5))
+                            .h_full(),
+                    )
+                    .child(mirror::mark("diff-text", Role::Text, heard, false, None)),
+            )
     }
 
     fn changes_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1240,7 +1402,7 @@ impl Ide {
         let branch = work.workspace.branch();
         let diff_of = work.diff_of.clone();
         let device_error = work.device_error.clone();
-        let muted = cx.theme().muted_foreground;
+        let busy = self.busy;
         let rows: Vec<AnyElement> = changes
             .iter()
             .enumerate()
@@ -1252,15 +1414,28 @@ impl Ide {
             .p_3()
             .gap_3()
             .children(device_error.map(|reason| {
-                div().text_color(cx.theme().danger).child(format!(
-                    "Changes are NOT being saved on this device: {reason}. Checkpoint to GitHub so they are not lost."
-                ))
+                Self::say(
+                    "device-error",
+                    Role::Status,
+                    format!(
+                        "Changes are NOT being saved on this device: {reason}. Checkpoint to GitHub so they are not lost."
+                    ),
+                )
+                .text_color(cx.theme().danger)
             }))
-            .child(if nothing {
-                "Nothing changed since the last commit.".to_owned()
-            } else {
-                format!("{} changed file{}", changes.len(), if changes.len() == 1 { "" } else { "s" })
-            })
+            .child(Self::say(
+                "change-count",
+                Role::Section,
+                if nothing {
+                    "Nothing changed since the last commit.".to_owned()
+                } else {
+                    format!(
+                        "{} changed file{}",
+                        changes.len(),
+                        if changes.len() == 1 { "" } else { "s" }
+                    )
+                },
+            ))
             .child(
                 v_flex()
                     .id("change-list")
@@ -1269,49 +1444,28 @@ impl Ide {
                     .overflow_y_scroll()
                     .children(rows),
             )
-            .children(diff_of.map(|file| {
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .gap_1()
-                    .child(div().text_color(muted).child(format!("Diff of {}", path::display(&file))))
-                    .child(
-                        div().flex_1().min_h_0().child(
-                            Editor::new(&self.diff)
-                                .aria_label("Diff")
-                                .line_height(relative(1.5))
-                                .h_full(),
-                        ),
-                    )
-            }))
+            .children(diff_of.map(|file| self.diff_view(&file, cx)))
             .child(
                 v_flex()
                     .gap_2()
                     .child("Commit message")
-                    .child(Input::new(&self.commit_input).large().h(px(TAP)))
+                    .child(Self::field("commit-message", "Commit message", &self.commit_input))
                     .child(
                         h_flex()
                             .gap_2()
                             .flex_wrap()
-                            .child(
-                                Self::button(
-                                    "commit",
-                                    format!("Commit to {branch}"),
-                                    cx,
-                                    |this, _, window, cx| this.commit(window, cx),
-                                )
-                                .primary()
-                                .disabled(self.busy || nothing),
-                            )
-                            .child(
-                                Self::button(
-                                    "checkpoint",
-                                    "Checkpoint now",
-                                    cx,
-                                    |this, _, window, cx| this.checkpoint_now(window, cx),
-                                )
-                                .disabled(self.busy || nothing),
-                            ),
+                            .child(Self::tap(
+                                cx,
+                                Tap::new("commit", format!("Commit to {branch}"))
+                                    .primary()
+                                    .disabled(busy || nothing),
+                                Self::commit,
+                            ))
+                            .child(Self::tap(
+                                cx,
+                                Tap::new("checkpoint", "Checkpoint now").disabled(busy || nothing),
+                                Self::checkpoint_now,
+                            )),
                     ),
             )
             .into_any_element()
@@ -1328,36 +1482,43 @@ impl Ide {
             .size_full()
             .p_4()
             .gap_3()
-            .child(if demo {
-                "Demo: nothing here is saved to GitHub.".to_owned()
-            } else {
-                format!("Signed in as {login}.")
-            })
-            .child(Self::button(
-                "look",
-                format!(
-                    "Theme: {} (tap for {})",
-                    self.look.name(),
-                    self.look.other().name()
-                ),
-                cx,
-                |this, _, _, cx| this.toggle_look(cx),
-            ))
-            .child(Self::button(
-                "mono",
-                if self.mono {
-                    "Code font: fixed-width (tap for sans)"
+            .child(Self::say(
+                "account",
+                Role::Text,
+                if demo {
+                    "Demo: nothing here is saved to GitHub.".to_owned()
                 } else {
-                    "Code font: sans (tap for fixed-width)"
+                    format!("Signed in as {login}.")
                 },
-                cx,
-                |this, _, _, cx| this.toggle_mono(cx),
             ))
-            .child(Self::button(
-                "repos",
-                "Switch repository",
+            .child(Self::tap(
                 cx,
-                |this, _, _, cx| {
+                Tap::new(
+                    "look",
+                    format!(
+                        "Theme: {}. Switch to {}",
+                        self.look.name(),
+                        self.look.other().name()
+                    ),
+                ),
+                |this, _, cx| this.toggle_look(cx),
+            ))
+            .child(Self::tap(
+                cx,
+                Tap::new(
+                    "mono",
+                    if self.mono {
+                        "Code font: fixed-width. Switch to sans"
+                    } else {
+                        "Code font: sans. Switch to fixed-width"
+                    },
+                ),
+                |this, _, cx| this.toggle_mono(cx),
+            ))
+            .child(Self::tap(
+                cx,
+                Tap::new("repos", "Switch repository"),
+                |this, _, cx| {
                     this.screen = Screen::Repos;
                     this.work = None;
                     if this.session.as_ref().is_some_and(|session| session.demo) {
@@ -1367,11 +1528,10 @@ impl Ide {
                     cx.notify();
                 },
             ))
-            .child(Self::button(
-                "sign-out-more",
-                "Sign out",
+            .child(Self::tap(
                 cx,
-                |this, _, window, cx| {
+                Tap::new("sign-out-more", "Sign out"),
+                |this, window, cx| {
                     this.sign_out(window, cx);
                 },
             ))
@@ -1403,29 +1563,18 @@ impl Ide {
             Pane::Changes => self.changes_pane(cx),
             Pane::More => self.more_pane(cx),
         };
-        let tabs: Vec<AnyElement> = Pane::ALL
+        let tabs: Vec<Div> = Pane::ALL
             .into_iter()
             .filter(|tab| !(wide && *tab == Pane::Files))
             .map(|tab| {
-                let button = Button::new(tab.label())
-                    .label(tab.label())
-                    .compact()
-                    .w_full()
-                    .px_1()
-                    .text_sm()
-                    .h(px(56.0))
-                    .toggled(tab == pane)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                Self::tap(
+                    cx,
+                    Tap::new(format!("tab-{}", tab.label()), tab.label()).tab(tab == pane),
+                    move |this, _, cx| {
                         this.pane = tab;
                         cx.notify();
-                    }));
-                // The open pane is outlined, not only tinted, so it does not rely on colour.
-                let button = if tab == pane {
-                    button.outline()
-                } else {
-                    button.ghost()
-                };
-                div().flex_1().min_w_0().child(button).into_any_element()
+                    },
+                )
             })
             .collect();
         let sidebar = wide.then(|| {
@@ -1448,8 +1597,15 @@ impl Ide {
                     .bg(cx.theme().title_bar)
                     .border_b_1()
                     .border_color(cx.theme().title_bar_border)
-                    .child(div().flex_1().truncate().child(title))
-                    .child(div().text_color(cx.theme().muted_foreground).child(state)),
+                    .child(
+                        Self::say("workspace", Role::Heading, title)
+                            .flex_1()
+                            .truncate(),
+                    )
+                    .child(
+                        Self::say("save-state", Role::Status, state)
+                            .text_color(cx.theme().muted_foreground),
+                    ),
             )
             .children(self.notice_bar(cx).map(|bar| div().p_2().child(bar)))
             .child(
@@ -1474,6 +1630,78 @@ impl Ide {
     }
 }
 
+/// The last `max` bytes of `text`, starting on a character boundary.
+fn tail(text: &str, max: usize) -> &str {
+    let mut start = text.len().saturating_sub(max);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Normal,
+    Primary,
+    Ghost,
+}
+
+/// A button, described once for both the canvas and assistive technology.
+struct Tap {
+    key: String,
+    label: String,
+    kind: Kind,
+    disabled: bool,
+    /// `Some` makes this a pane tab; the value says whether it is the open one.
+    current: Option<bool>,
+    fill: bool,
+    start: bool,
+    height: f32,
+}
+
+impl Tap {
+    fn new(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: Kind::Normal,
+            disabled: false,
+            current: None,
+            fill: false,
+            start: false,
+            height: TAP,
+        }
+    }
+
+    fn primary(mut self) -> Self {
+        self.kind = Kind::Primary;
+        self
+    }
+
+    fn ghost(mut self) -> Self {
+        self.kind = Kind::Ghost;
+        self
+    }
+
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    fn tab(mut self, current: bool) -> Self {
+        self.current = Some(current);
+        self.fill = true;
+        self.height = 56.0;
+        self
+    }
+
+    /// Left-align the label, for rows in a list.
+    fn start(mut self) -> Self {
+        self.start = true;
+        self
+    }
+}
+
 impl Render for Ide {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let screen = match self.screen {
@@ -1487,6 +1715,7 @@ impl Render for Ide {
             .text_color(cx.theme().foreground)
             .line_height(relative(1.5))
             .child(screen)
+            .child(mirror::flush())
     }
 }
 

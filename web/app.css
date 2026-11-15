@@ -40,3 +40,35 @@ body > canvas {
 #status[hidden] {
   display: none;
 }
+
+/* Invisible HTML elements placed over the canvas so that screen readers,
+   Voice Control, Switch Control and keyboards can operate the app (see
+   crates/app/src/mirror.rs). They let touches through to the canvas. */
+#a11y {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+#a11y > * {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  font: inherit;
+  overflow: hidden;
+  white-space: pre-wrap;
+  pointer-events: none;
+  appearance: none;
+  -webkit-appearance: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* A keyboard's focus must be visible even though the element is not. */
+#a11y > :focus-visible {
+  outline: 3px solid #ffd866;
+  outline-offset: -3px;
+}

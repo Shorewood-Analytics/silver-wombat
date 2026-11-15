@@ -15,9 +15,24 @@ There is no server: the page talks straight to the GitHub API with your token.
 - Commit all changes as one commit. Before writing, the app fetches the branch and refuses if any changed file differs on GitHub from what you started with. Nothing is overwritten.
 - A terminal that runs in the browser on the open repository: `ls`, `cd`, `cat`, `head`, `tail`, `wc`, `grep`, `find`, `echo`, `touch`, `rm`, `mv`, `cp`, `open`, `save`, and `git status | diff | commit -m | log | branch | switch | restore | pull`, with pipes, `&&`, `;`, `>` and `>>`.
 
+## Accessibility
+
+GPUI draws the interface into a canvas, which assistive technology cannot see into, and GPUI's own accessibility tree is compiled out for the browser.
+So the app describes itself: every button, field and piece of text it draws is also written to the page as an invisible HTML element placed exactly over it (`crates/app/src/mirror.rs`).
+
+- A screen reader reads those elements and activates them directly. New terminal output, save states and notices are announced.
+- Voice Control and Switch Control tap an element's centre; the tap passes through to the control drawn underneath.
+- A hardware keyboard can Tab between them, with a visible focus outline, and press Enter.
+- Every button is at least 48 px tall. Nothing needs a drag, a long press or two hands, and nothing times out.
+- All text is at least 5.7:1 against its background in both themes. A test checks the theme files (`cargo test -p xtask`).
+
+Checked in Chrome by `e2e/smoke.mjs`, which operates the whole app only through those elements and runs axe on every pane (no WCAG A/AA findings).
+**Not yet checked with VoiceOver, Switch Control or Voice Control on an iPhone.** That needs a real device.
+
+Known gaps: a screen reader hears the end of the terminal output and of a diff, not all of it, and reads the file being edited through GPUI's hidden text area, which holds only the text around the cursor.
+
 ## What does not work yet
 
-- **Screen readers, Switch Control and Voice Control cannot operate the app.** GPUI draws to a canvas and its web platform exposes no accessibility tree. Closing this gap is the next piece of work.
 - No Python, no code completion, no OPFS storage, no keyboard accessory row.
 - The terminal has no machine behind it. `python`, `cargo`, `npm` and other programs answer "not available".
 - Local changes are kept in `localStorage`, which Safari may evict and which holds about 5 MB. The GitHub checkpoint is the durable copy.
@@ -77,6 +92,13 @@ cargo xtask check
 ```
 
 The first line covers `core` and `xtask`. `cargo xtask check` lints the app for the browser target.
+
+To run the built site in a real browser and operate it end to end (needs Chrome and Node):
+
+```sh
+cargo xtask dist
+npm ci --prefix e2e && node e2e/smoke.mjs
+```
 
 The owner (`benpshore`) may push their own work directly to `main` without a PR or passing CI. CI still runs after a push; releases retain their CI gates. Force-push, deletion, and merge commits remain blocked for everyone.
 

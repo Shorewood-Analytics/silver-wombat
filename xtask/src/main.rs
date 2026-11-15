@@ -225,6 +225,96 @@ mod tests {
         assert!(version.starts_with("0.2."), "{version}");
     }
 
+    fn luminance(hex: &str) -> f64 {
+        let channel = |index: usize| {
+            let value = f64::from(u8::from_str_radix(&hex[index..index + 2], 16).unwrap()) / 255.0;
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+    }
+
+    /// The WCAG contrast ratio of two `#rrggbb` colours.
+    fn contrast(a: &str, b: &str) -> f64 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The app draws its own text, so no browser tool can measure its
+    /// contrast. This checks the theme files instead: text needs 4.5:1 and
+    /// the outline of a text field needs 3:1 (WCAG 1.4.3 and 1.4.11).
+    #[test]
+    fn theme_colours_have_enough_contrast() {
+        let themes = fs::read_to_string(root().join("crates/app/src/themes.json")).unwrap();
+        let themes: serde_json::Value = serde_json::from_str(&themes).unwrap();
+        for theme in themes["themes"].as_array().unwrap() {
+            let name = theme["name"].as_str().unwrap();
+            let colour = |group: &str, key: &str| theme[group][key].as_str().unwrap().to_owned();
+            let background = colour("colors", "background");
+            let editor = colour("highlight", "editor.background");
+            let mut text = vec![
+                ("text", colour("colors", "foreground"), background.clone()),
+                (
+                    "muted text",
+                    colour("colors", "muted.foreground"),
+                    background.clone(),
+                ),
+                (
+                    "muted text on the title bar",
+                    colour("colors", "muted.foreground"),
+                    colour("colors", "title_bar.background"),
+                ),
+                (
+                    "primary button",
+                    colour("colors", "primary.foreground"),
+                    colour("colors", "primary.background"),
+                ),
+                (
+                    "button",
+                    colour("colors", "secondary.foreground"),
+                    colour("colors", "secondary.background"),
+                ),
+                (
+                    "notice",
+                    colour("colors", "foreground"),
+                    colour("colors", "muted.background"),
+                ),
+                (
+                    "error text",
+                    colour("colors", "base.red"),
+                    background.clone(),
+                ),
+                (
+                    "line numbers",
+                    colour("highlight", "editor.line_number"),
+                    editor.clone(),
+                ),
+            ];
+            for (_, style) in theme["highlight"]["syntax"].as_object().unwrap() {
+                if let Some(code) = style["color"].as_str() {
+                    text.push(("code", code.to_owned(), editor.clone()));
+                }
+            }
+            for (what, foreground, behind) in text {
+                let ratio = contrast(&foreground, &behind);
+                assert!(
+                    ratio >= 4.5,
+                    "{name}: {what} {foreground} on {behind} is {ratio:.2}:1"
+                );
+            }
+            let outline = contrast(&colour("colors", "input.border"), &background);
+            assert!(
+                outline >= 3.0,
+                "{name}: text field outline is {outline:.2}:1"
+            );
+            let ring = contrast(&colour("colors", "ring"), &background);
+            assert!(ring >= 3.0, "{name}: focus ring is {ring:.2}:1");
+        }
+    }
+
     #[test]
     fn splits_passthrough_arguments() {
         let args: Vec<String> = ["--profile", "quick", "--", "-Zbuild-std"]

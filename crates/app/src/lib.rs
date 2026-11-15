@@ -3,6 +3,7 @@
 #![cfg(target_family = "wasm")]
 
 mod ide;
+mod mirror;
 mod platform;
 mod theme;
 
@@ -15,6 +16,16 @@ use wasm_bindgen::prelude::wasm_bindgen;
 thread_local! {
     /// Keeps the application alive for as long as the page is open.
     static APPLICATION: RefCell<Option<ApplicationHandle>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` inside the app, from a browser event that GPUI did not deliver.
+/// Must not be called while GPUI is already running app code.
+pub(crate) fn with_app(f: impl FnOnce(&mut App)) {
+    APPLICATION.with(|application| {
+        if let Some(handle) = application.borrow().as_ref() {
+            handle.update(f);
+        }
+    });
 }
 
 fn launch(cx: &mut App) {
