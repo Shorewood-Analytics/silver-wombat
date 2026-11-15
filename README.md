@@ -33,9 +33,9 @@ Known gaps: a screen reader hears the end of the terminal output and of a diff, 
 
 ## What does not work yet
 
-- No Python, no code completion, no OPFS storage, no keyboard accessory row.
+- No Python, no code completion, no keyboard accessory row.
 - The terminal has no machine behind it. `python`, `cargo`, `npm` and other programs answer "not available".
-- Local changes are kept in `localStorage`, which Safari may evict and which holds about 5 MB. The GitHub checkpoint is the durable copy.
+- Local changes are kept in the browser's origin-private file system (Safari 26 or later; older browsers fall back to `localStorage`, about 5 MB). The app asks the browser not to evict it, but the browser may refuse, so the GitHub checkpoint is the durable copy. More > Export writes all changes to a patch file that `git apply` accepts.
 - GitHub sign-in with a browser redirect is not possible from a static page: GitHub's login endpoints do not allow cross-origin browser requests. A token is the only way in.
 - Only text files up to 2 MB open in the editor.
 

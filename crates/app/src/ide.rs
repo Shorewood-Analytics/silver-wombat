@@ -958,12 +958,13 @@ impl Ide {
             .relative()
             .when(tap.fill, |wrapper| wrapper.flex_1().min_w_0())
             .child(button)
+            // A disabled button must do nothing, however it is activated.
             .child(mirror::mark(
                 tap.key,
                 role,
                 tap.label,
                 tap.disabled,
-                Some(action),
+                (!tap.disabled).then_some(action),
             ))
     }
 
