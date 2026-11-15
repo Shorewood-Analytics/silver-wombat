@@ -114,7 +114,7 @@ fn runs_a_file_with_the_repository_mounted() {
     assert_eq!(job.args, ["one", "two words"]);
     assert_eq!(job.cwd, "");
     assert_eq!(job.stdin, None);
-    assert!(job.install.is_empty());
+    assert_eq!(job.install, Vec::<String>::new());
     let paths: Vec<&str> = job.files.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(paths, ["README.md", "src/main.py", "src/util.py"]);
 
@@ -331,7 +331,7 @@ fn uv_run_installs_what_the_script_declares() {
 
     run(&sh, &ws, "uv run plain.py");
     assert_eq!(python.last().python, "3.14");
-    assert!(python.last().install.is_empty());
+    assert_eq!(python.last().install, Vec::<String>::new());
     run(&sh, &ws, "uv run python -c 'print(1)'");
     assert_eq!(python.last().entry, Entry::Code("print(1)".to_owned()));
 

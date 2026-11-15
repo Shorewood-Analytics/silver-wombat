@@ -1,5 +1,6 @@
 //! The whole UI: sign-in, repository list and the workspace panes.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -10,18 +11,20 @@ use gpui_kit::component::input::{
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, SharedString, Subscription,
-    Window, div, px, relative,
+    AnyElement, App, ClickEvent, Context, Div, Edges, ElementId, Entity, Focusable as _,
+    KeyDownEvent, Keystroke, Modifiers, Pixels, SharedString, Subscription, Window, div, px,
+    relative,
 };
 use silver_wombat_core::Error;
 use silver_wombat_core::fake::FakeGitHub;
 use silver_wombat_core::github::{GitHub, Repo};
-use silver_wombat_core::path;
 use silver_wombat_core::python::PythonTool;
+use silver_wombat_core::screen::{self, Cap, KEY_PAGES, Layout, Pane, Press};
 use silver_wombat_core::shell::Shell;
 use silver_wombat_core::workspace::{
     Change, ChangeKind, DirEntry, EntryKind, FileContent, SaveState, Workspace,
 };
+use silver_wombat_core::{palette, path};
 
 use crate::mirror::{self, Action, Role};
 use crate::platform::{self, FetchHttp, Kept};
@@ -31,14 +34,17 @@ use crate::theme::{self, Look, MONO, SANS};
 const KEY_TOKEN: &str = "silver-wombat.token";
 const KEY_LOOK: &str = "silver-wombat.look";
 const KEY_MONO: &str = "silver-wombat.mono";
+const KEY_KEYS: &str = "silver-wombat.keys";
+const KEY_SWIPE: &str = "silver-wombat.swipe";
 /// Wait this long after the last edit before writing to the device.
 const DEVICE_SAVE_DELAY: Duration = Duration::from_millis(400);
 /// Wait this long after the last edit before checkpointing to GitHub.
 const CHECKPOINT_DELAY: Duration = Duration::from_secs(5);
 /// Terminal text kept on screen. Older output is dropped from the top.
 const TERMINAL_KEEP_BYTES: usize = 200 * 1024;
-/// Windows at least this wide show the file list beside the open pane.
-const WIDE: f32 = 900.0;
+/// Space between the extra keys, and at each end of their row.
+const KEY_GAP: f32 = 2.0;
+const KEY_EDGE: f32 = 4.0;
 /// Smallest height of anything tappable.
 const TAP: f32 = 48.0;
 
@@ -49,33 +55,69 @@ enum Screen {
     Work,
 }
 
+/// Most results the finder lists: what fits on a phone with the keyboard up.
+const FINDER_ROWS: usize = 6;
+
+/// Something the finder can do besides opening a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pane {
-    Files,
-    Editor,
-    Terminal,
-    Changes,
-    More,
+enum Act {
+    Show(Pane),
+    RunOpenFile,
+    Checkpoint,
+    Theme,
+    CodeFont,
+    Export,
 }
 
-impl Pane {
-    const ALL: [Self; 5] = [
-        Self::Files,
-        Self::Editor,
-        Self::Terminal,
-        Self::Changes,
-        Self::More,
+impl Act {
+    const ALL: [Self; 10] = [
+        Self::Show(Pane::Files),
+        Self::Show(Pane::Editor),
+        Self::Show(Pane::Terminal),
+        Self::Show(Pane::Changes),
+        Self::Show(Pane::More),
+        Self::RunOpenFile,
+        Self::Checkpoint,
+        Self::Theme,
+        Self::CodeFont,
+        Self::Export,
     ];
 
     fn label(self) -> &'static str {
         match self {
-            Self::Files => "Files",
-            Self::Editor => "Editor",
-            Self::Terminal => "Terminal",
-            Self::Changes => "Changes",
-            Self::More => "More",
+            Self::Show(Pane::Files) => "Go to Files",
+            Self::Show(Pane::Editor) => "Go to Editor",
+            Self::Show(Pane::Terminal) => "Go to Terminal",
+            Self::Show(Pane::Changes) => "Go to Changes (diff, commit)",
+            Self::Show(Pane::More) => "Go to More (settings, export, sign out)",
+            Self::RunOpenFile => "Run the open file with Python",
+            Self::Checkpoint => "Checkpoint to GitHub now",
+            Self::Theme => "Switch theme (Dark, Midnight)",
+            Self::CodeFont => "Switch code font (sans, fixed-width)",
+            Self::Export => "Export changes as a patch file",
         }
     }
+}
+
+/// One line of the finder's results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Found {
+    File(String),
+    Act(Act),
+}
+
+/// The finder, while it is open.
+struct Finder {
+    /// Every file in the repository, once listed.
+    files: Vec<String>,
+    results: Vec<Found>,
+}
+
+/// Which text the extra keys act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyTarget {
+    Editor,
+    Command,
 }
 
 struct Session {
@@ -99,11 +141,32 @@ struct Work {
 }
 
 /// The root view.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent settings and flags, not states of one thing"
+)]
 pub struct Ide {
     screen: Screen,
     pane: Pane,
+    /// What the third column shows on a screen wide enough to have one.
+    side: Pane,
     look: Look,
     mono: bool,
+    /// Show the extra keys even when no on-screen keyboard is open.
+    keys_always: bool,
+    /// A quick sideways swipe changes pane. On unless switched off.
+    swipes: bool,
+    /// Which group of extra keys is showing.
+    key_page: usize,
+    /// Set while Control is held for the next key.
+    control: Option<KeyTarget>,
+    /// The same fact, shared with the page-level listener that catches the
+    /// next character typed (see `platform::watch_typing`).
+    control_held: Rc<Cell<bool>>,
+    /// Set while drawing: the extra keys are showing and act on the terminal.
+    keys_beside_terminal: bool,
+    finder: Option<Finder>,
+    finder_input: Entity<InputState>,
     busy: bool,
     notice: Option<String>,
     /// Where unsaved work went the last time it was saved on this device.
@@ -180,58 +243,44 @@ impl Ide {
             cx.new(|cx| InputState::new(window, cx).placeholder("Type a command, then Run"));
         let commit_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Describe the change"));
+        let finder_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("A few letters of its name"));
         let editor = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let terminal = read_only(window, cx, "text");
         let diff = read_only(window, cx, "diff");
 
-        let subscriptions = vec![
-            cx.subscribe_in(
+        let subscriptions = Self::watch_inputs(
+            [
                 &token_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.sign_in(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
                 &repo_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.open_typed_repo(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
                 &command_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.run_typed_command(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
+                &finder_input,
                 &commit_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.commit(window, cx);
-                    }
-                },
-            ),
-        ];
+            ],
+            window,
+            cx,
+        );
 
         let look = Look::from_name(&platform::load(KEY_LOOK).unwrap_or_default());
         let mono = platform::load(KEY_MONO).as_deref() == Some("1");
+        let keys_always = platform::load(KEY_KEYS).as_deref() == Some("always");
         theme::apply(look, cx);
 
+        let control_held = Rc::new(Cell::new(false));
         let mut this = Self {
             screen: Screen::SignIn,
             pane: Pane::Files,
+            side: Pane::Terminal,
             look,
             mono,
+            keys_always,
+            swipes: platform::load(KEY_SWIPE).as_deref() != Some("off"),
+            key_page: 0,
+            control: None,
+            control_held: control_held.clone(),
+            keys_beside_terminal: false,
+            finder: None,
+            finder_input,
             busy: false,
             notice: None,
             kept: None,
@@ -250,11 +299,118 @@ impl Ide {
             editor_subscription: None,
             _subscriptions: subscriptions,
         };
+        Self::watch_page(&control_held, window, cx);
         // A token saved on this device signs in without asking again.
         if let Some(token) = platform::load(KEY_TOKEN) {
             this.start_session(token, window, cx);
         }
         this
+    }
+
+    /// Things the page itself is watched for, because they do not arrive as
+    /// events on any one control: swipes, a character typed while Control is
+    /// held on the extra keys, and the finder's keyboard shortcut.
+    fn watch_page(control_held: &Rc<Cell<bool>>, window: &mut Window, cx: &mut Context<Self>) {
+        // Touches are watched on the page itself, to notice a swipe between panes.
+        let ide = cx.weak_entity();
+        let handle = window.window_handle();
+        platform::watch_touches(move |start_x, dx, dy, millis| {
+            let ide = ide.clone();
+            crate::with_app(|cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = ide.update(cx, |this, cx| {
+                        this.touched(start_x, dx, dy, millis, window, cx);
+                    });
+                });
+            });
+        });
+        let ide = cx.weak_entity();
+        platform::watch_typing(control_held.clone(), move |typed| {
+            let ide = ide.clone();
+            crate::with_app(|cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = ide.update(cx, |this, cx| {
+                        this.typed_with_control(&typed, window, cx);
+                    });
+                });
+            });
+        });
+        // With a keyboard attached, Control or Command with K opens the finder,
+        // wherever the keyboard's focus is.
+        let ide = cx.weak_entity();
+        platform::watch_finder_shortcut(move || {
+            let ide = ide.clone();
+            crate::with_app(|cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = ide.update(cx, |this, cx| {
+                        if this.screen == Screen::Work {
+                            this.open_finder(window, cx);
+                        }
+                    });
+                });
+            });
+        });
+    }
+
+    /// What Enter and typing do in each of the single-line fields.
+    fn watch_inputs(
+        [
+            token_input,
+            repo_input,
+            command_input,
+            finder_input,
+            commit_input,
+        ]: [&Entity<InputState>; 5],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        vec![
+            cx.subscribe_in(
+                token_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.sign_in(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                repo_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.open_typed_repo(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                command_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.run_typed_command(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                finder_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.pick_first(window, cx),
+                    InputEvent::Change => this.find(cx),
+                    _ => {}
+                },
+            ),
+            cx.subscribe_in(
+                commit_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.commit(window, cx);
+                    }
+                },
+            ),
+        ]
     }
 
     fn fail(&mut self, error: &Error, cx: &mut Context<Self>) {
@@ -928,6 +1084,371 @@ impl Ide {
         cx.notify();
     }
 
+    fn toggle_swipes(&mut self, cx: &mut Context<Self>) {
+        self.swipes = !self.swipes;
+        let _ = platform::save(KEY_SWIPE, if self.swipes { "on" } else { "off" });
+        cx.notify();
+    }
+
+    /// A touch ended. If it was a swipe, show the next or previous pane: the
+    /// same as tapping the tab beside the current one.
+    fn touched(
+        &mut self,
+        start_x: f32,
+        dx: f32,
+        dy: f32,
+        millis: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.swipes || self.screen != Screen::Work || self.finder.is_some() {
+            return;
+        }
+        let page: f32 = window.viewport_size().width.into();
+        let Some(swipe) = screen::swipe(start_x, dx, dy, millis, page) else {
+            return;
+        };
+        let (covered, _) = Self::covered(window);
+        let width: f32 = (window.viewport_size().width - covered.left - covered.right).into();
+        let layout = Layout::for_width(width);
+        let (main, side) = layout.shown(self.pane, self.side);
+        if let Some(pane) = swipe.from(side.unwrap_or(main), &layout.tabs()) {
+            self.pane = pane;
+            if pane.is_side() {
+                self.side = pane;
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_keys(&mut self, cx: &mut Context<Self>) {
+        self.keys_always = !self.keys_always;
+        let _ = platform::save(KEY_KEYS, if self.keys_always { "always" } else { "auto" });
+        cx.notify();
+    }
+
+    // ----- Finder -----
+    //
+    // "Go to": type a few letters of a file's name, or of an action, and
+    // pick it. One way to reach everything without walking folders or tabs.
+
+    fn open_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let workspace = work.workspace.clone();
+        self.finder = Some(Finder {
+            files: Vec::new(),
+            results: Vec::new(),
+        });
+        self.finder_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        self.find(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let listed = workspace.files_under("").await;
+            this.update_in(cx, |this, _, cx| match listed {
+                Ok(files) => {
+                    if let Some(finder) = &mut this.finder {
+                        finder.files = files.into_iter().map(|file| file.path).collect();
+                        this.find(cx);
+                    }
+                }
+                Err(error) => this.fail(&error, cx),
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finder = None;
+        // The finder's field is going away. Let go of the keyboard, so that
+        // Tab moves between the page's controls again.
+        window.blur(cx);
+        cx.notify();
+    }
+
+    /// Ranks files and actions against what has been typed.
+    fn find(&mut self, cx: &mut Context<Self>) {
+        let query = self.finder_input.read(cx).value();
+        let Some(finder) = &mut self.finder else {
+            return;
+        };
+        let files = finder.files.iter().map(String::as_str);
+        let actions = Act::ALL.iter().map(|act| act.label());
+        let best = palette::rank(&query, files.chain(actions), FINDER_ROWS);
+        let results = best
+            .into_iter()
+            .map(|found| match finder.files.get(found.index) {
+                Some(file) => Found::File(file.clone()),
+                None => Found::Act(Act::ALL[found.index - finder.files.len()]),
+            })
+            .collect();
+        finder.results = results;
+        cx.notify();
+    }
+
+    fn pick_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let first = self
+            .finder
+            .as_ref()
+            .and_then(|finder| finder.results.first().cloned());
+        if let Some(found) = first {
+            self.pick(found, window, cx);
+        }
+    }
+
+    fn pick(&mut self, found: Found, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_finder(window, cx);
+        match found {
+            Found::File(file) => self.open_file(file, window, cx),
+            Found::Act(Act::Show(pane)) => {
+                self.pane = pane;
+                if pane.is_side() {
+                    self.side = pane;
+                }
+            }
+            Found::Act(Act::RunOpenFile) => {
+                let open = self.work.as_ref().and_then(|work| work.open.clone());
+                self.pane = Pane::Terminal;
+                self.side = Pane::Terminal;
+                match open {
+                    // Quoted, so a name with a space in it stays one word.
+                    Some(file) => {
+                        let quoted = path::display(&file).replace('\'', "'\\''");
+                        self.run_command(format!("python '{quoted}'"), window, cx);
+                    }
+                    None => self.print("No file is open to run.\n", window, cx),
+                }
+            }
+            Found::Act(Act::Checkpoint) => self.checkpoint_now(window, cx),
+            Found::Act(Act::Theme) => self.toggle_look(cx),
+            Found::Act(Act::CodeFont) => self.toggle_mono(cx),
+            Found::Act(Act::Export) => self.export_patch(window, cx),
+        }
+        cx.notify();
+    }
+
+    fn finder_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let results = match &self.finder {
+            Some(finder) => finder.results.clone(),
+            None => Vec::new(),
+        };
+        let none = results.is_empty();
+        let rows: Vec<Div> = results
+            .into_iter()
+            .enumerate()
+            .map(|(index, found)| {
+                let (label, name) = match &found {
+                    Found::File(file) => {
+                        (path::display(file), format!("Open {}", path::display(file)))
+                    }
+                    Found::Act(act) => (act.label().to_owned(), act.label().to_owned()),
+                };
+                Self::tap(
+                    cx,
+                    Tap::new(format!("found-{index}"), label)
+                        .named(name)
+                        .start(),
+                    move |this, window, cx| this.pick(found.clone(), window, cx),
+                )
+            })
+            .collect();
+        v_flex()
+            .size_full()
+            .p_3()
+            .gap_2()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_finder(window, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Self::field("finder", "Find a file or action", &self.finder_input).flex_1(),
+                    )
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("finder-close", "Close"),
+                        Self::close_finder,
+                    )),
+            )
+            .when(none, |pane| {
+                pane.child(
+                    Self::say("finder-none", Role::Status, "Nothing matches.")
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
+            .children(rows)
+            .into_any_element()
+    }
+
+    // ----- Extra keys -----
+    //
+    // The row of keys an on-screen keyboard lacks (see `screen::KEY_PAGES`).
+
+    /// Which text the extra keys act on: the command line when the terminal
+    /// is the open pane or, where both show, when it is being typed in.
+    fn key_target(&self, window: &Window, cx: &App) -> KeyTarget {
+        let typing_a_command = self.command_input.focus_handle(cx).is_focused(window);
+        let (covered, _) = Self::covered(window);
+        let width: f32 = (window.viewport_size().width - covered.left - covered.right).into();
+        match Layout::for_width(width) {
+            Layout::Large if typing_a_command => KeyTarget::Command,
+            Layout::Large => KeyTarget::Editor,
+            _ if self.pane == Pane::Terminal => KeyTarget::Command,
+            _ => KeyTarget::Editor,
+        }
+    }
+
+    fn press_key(&mut self, cap: Cap, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.key_target(window, cx);
+        match cap.press {
+            Press::NextPage => self.key_page = (self.key_page + 1) % KEY_PAGES.len(),
+            Press::Control => {
+                let held = self.take_control().is_none();
+                if held {
+                    self.control = Some(target);
+                    self.control_held.set(true);
+                }
+                // Keep the text focused, so the next key typed goes to it.
+                self.focus_target(target, window, cx);
+            }
+            Press::Text(text) => {
+                if self.take_control().is_some() {
+                    self.send_key(target, text, true, window, cx);
+                } else {
+                    self.focus_target(target, window, cx);
+                    match target {
+                        KeyTarget::Editor => self
+                            .editor
+                            .update(cx, |editor, cx| editor.insert(text, window, cx)),
+                        KeyTarget::Command => self
+                            .command_input
+                            .update(cx, |input, cx| input.insert(text, window, cx)),
+                    }
+                }
+            }
+            Press::Key(key) => {
+                let control = self.take_control().is_some();
+                self.send_key(target, key, control, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn focus_target(&mut self, target: KeyTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            KeyTarget::Editor => self
+                .editor
+                .update(cx, |editor, cx| editor.focus(window, cx)),
+            KeyTarget::Command => self
+                .command_input
+                .update(cx, |input, cx| input.focus(window, cx)),
+        }
+    }
+
+    /// Lets go of Control, returning what it was held for.
+    fn take_control(&mut self) -> Option<KeyTarget> {
+        self.control_held.set(false);
+        self.control.take()
+    }
+
+    /// A character was typed while Control was held on the extra keys. The
+    /// page caught it before any text field did, so it is sent as a Control
+    /// key and never typed.
+    fn typed_with_control(&mut self, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.take_control() {
+            self.send_key(target, typed, true, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Sends a key to the target as if a keyboard had. The terminal's own
+    /// keys (history, completion, stop, clear) are handled here.
+    fn send_key(
+        &mut self,
+        target: KeyTarget,
+        key: &str,
+        control: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if target == KeyTarget::Command {
+            match (control, key.to_lowercase().as_str()) {
+                (false, "tab") => return self.complete_command(window, cx),
+                (false, "up") => return self.recall(true, window, cx),
+                (false, "down") => return self.recall(false, window, cx),
+                (true, "c") => {
+                    if let Some(work) = &self.work {
+                        work.shell.stop();
+                    }
+                    return;
+                }
+                (true, "l") => return self.run_command("clear".to_owned(), window, cx),
+                (true, "u") | (false, "escape") => {
+                    self.command_input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.focus_target(target, window, cx);
+        let keystroke = Keystroke {
+            modifiers: if control {
+                Modifiers::control()
+            } else {
+                Modifiers::none()
+            },
+            key: key.to_lowercase(),
+            key_char: None,
+        };
+        // After this update, so that whatever the key does can reach this view.
+        window.defer(cx, move |window, cx| {
+            window.dispatch_keystroke(keystroke, cx);
+        });
+    }
+
+    /// The row of extra keys, as wide as `width` points.
+    fn key_row(&mut self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        let page = KEY_PAGES[self.key_page % KEY_PAGES.len()];
+        let rows = screen::key_rows(page.len(), width, KEY_GAP, KEY_EDGE);
+        let held = self.control.is_some();
+        v_flex()
+            .gap(px(KEY_GAP))
+            .px(px(KEY_EDGE))
+            .py(px(KEY_GAP))
+            .bg(cx.theme().tab_bar)
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .children(page.chunks(page.len().div_ceil(rows)).map(|caps| {
+                h_flex()
+                    .gap(px(KEY_GAP))
+                    .children(caps.iter().copied().map(|cap| {
+                        let on = held && cap.press == Press::Control;
+                        let name = if on {
+                            "Control, on".to_owned()
+                        } else {
+                            cap.name.to_owned()
+                        };
+                        let mut tap = Tap::new(format!("key-{}", cap.name), cap.label)
+                            .named(name)
+                            .keycap();
+                        if on {
+                            tap = tap.primary();
+                        }
+                        Self::tap(cx, tap, move |this, window, cx| {
+                            this.press_key(cap, window, cx);
+                        })
+                    }))
+            }))
+            .into_any_element()
+    }
+
     // ----- Drawing -----
     //
     // Everything the person can tap, type into or read goes through `tap`,
@@ -947,9 +1468,16 @@ impl Ide {
                 let _ = entity.update(cx, |this, cx| on(this, window, cx));
             })
         };
-        let mut button = Button::new(ElementId::Name(tap.key.clone().into()))
-            .label(tap.label.clone())
-            .large()
+        let mut button =
+            Button::new(ElementId::Name(tap.key.clone().into())).label(tap.label.clone());
+        // The size sets the label's type size: tabs share a row five ways,
+        // so they use a smaller one to keep their names whole.
+        button = match (tap.current.is_some(), tap.tiny) {
+            (true, true) => button.xsmall(),
+            (true, false) => button,
+            (false, _) => button.large(),
+        };
+        let mut button = button
             .h(px(tap.height))
             .disabled(tap.disabled)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| on(this, window, cx)));
@@ -960,12 +1488,15 @@ impl Ide {
         };
         if let Some(current) = tap.current {
             // The open pane is outlined, not only tinted, so it does not rely on colour.
-            button = button.compact().px_1().text_sm().toggled(current);
+            button = button.compact().toggled(current);
             button = if current {
                 button.outline()
             } else {
                 button.ghost()
             };
+        }
+        if tap.keycap {
+            button = button.compact().px_1();
         }
         if tap.fill {
             button = button.w_full();
@@ -985,7 +1516,7 @@ impl Ide {
             .child(mirror::mark(
                 tap.key,
                 role,
-                tap.label,
+                tap.name.unwrap_or(tap.label),
                 tap.disabled,
                 (!tap.disabled).then_some(action),
             ))
@@ -1375,27 +1906,31 @@ impl Ide {
                         h_flex()
                             .gap_2()
                             .flex_wrap()
-                            .child(Self::tap(
-                                cx,
-                                Tap::new("complete", "Complete"),
-                                |this, window, cx| {
-                                    this.complete_command(window, cx);
-                                },
-                            ))
-                            .child(Self::tap(
-                                cx,
-                                Tap::new("previous", "Previous"),
-                                |this, window, cx| {
-                                    this.recall(true, window, cx);
-                                },
-                            ))
-                            .child(Self::tap(
-                                cx,
-                                Tap::new("next", "Next"),
-                                |this, window, cx| {
-                                    this.recall(false, window, cx);
-                                },
-                            ))
+                            // The extra keys' Tab, Up and Down do these three
+                            // jobs, so beside them these would only take room.
+                            .when(!self.keys_beside_terminal, |row| {
+                                row.child(Self::tap(
+                                    cx,
+                                    Tap::new("complete", "Complete"),
+                                    |this, window, cx| {
+                                        this.complete_command(window, cx);
+                                    },
+                                ))
+                                .child(Self::tap(
+                                    cx,
+                                    Tap::new("previous", "Previous"),
+                                    |this, window, cx| {
+                                        this.recall(true, window, cx);
+                                    },
+                                ))
+                                .child(Self::tap(
+                                    cx,
+                                    Tap::new("next", "Next"),
+                                    |this, window, cx| {
+                                        this.recall(false, window, cx);
+                                    },
+                                ))
+                            })
                             .child(Self::tap(cx, Tap::new("stop", "Stop"), |this, _, _| {
                                 if let Some(work) = &this.work {
                                     work.shell.stop();
@@ -1622,6 +2157,30 @@ impl Ide {
                 ),
                 |this, _, cx| this.toggle_mono(cx),
             ))
+            .child(Self::tap(
+                cx,
+                Tap::new(
+                    "keys",
+                    if self.keys_always {
+                        "Extra keys (Esc, Tab, arrows, symbols): always shown. Show only with the on-screen keyboard"
+                    } else {
+                        "Extra keys (Esc, Tab, arrows, symbols): shown with the on-screen keyboard. Show always"
+                    },
+                ),
+                |this, _, cx| this.toggle_keys(cx),
+            ))
+            .child(Self::tap(
+                cx,
+                Tap::new(
+                    "swipes",
+                    if self.swipes {
+                        "Swipe sideways to change pane: on. Turn off"
+                    } else {
+                        "Swipe sideways to change pane: off. Turn on"
+                    },
+                ),
+                |this, _, cx| this.toggle_swipes(cx),
+            ))
             .child(Self::say("storage", Role::Text, self.storage_note()))
             .child(Self::tap(
                 cx,
@@ -1651,8 +2210,91 @@ impl Ide {
             .into_any_element()
     }
 
+    /// How much of each edge of the page is covered (by the notch, rounded
+    /// corners, the home indicator, or the on-screen keyboard), and whether
+    /// the keyboard is up.
+    ///
+    /// Safari keeps the page its full height when the keyboard opens and
+    /// covers the bottom of it; what stays in view is the "visual viewport".
+    /// Pinch-zoom shrinks that too, and then nothing should move.
+    fn covered(window: &Window) -> (Edges<Pixels>, bool) {
+        if platform::zoomed() {
+            return (window.insets().safe_area, false);
+        }
+        let page = window.viewport_size();
+        let visible = window.fully_visible_bounds();
+        let covered = Edges {
+            top: visible.origin.y,
+            left: visible.origin.x,
+            right: page.width - visible.origin.x - visible.size.width,
+            bottom: page.height - visible.origin.y - visible.size.height,
+        };
+        let keyboard = screen::keyboard_is_open(
+            page.height.into(),
+            window.visual_viewport_bounds().size.height.into(),
+        );
+        (covered, keyboard)
+    }
+
+    /// The bar across the top: what is open and whether it is saved. With the
+    /// keyboard up it also holds the button that puts the keyboard away, and
+    /// on a phone it drops the title to leave room.
+    fn header(
+        title: String,
+        state: &'static str,
+        layout: Layout,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let cramped = keyboard && layout == Layout::Compact;
+        // On a phone the title sits above the save state; with more width
+        // they share a line. With the keyboard up a phone drops the title.
+        let stacked = layout == Layout::Compact;
+        h_flex()
+            .items_center()
+            .px_3()
+            .py_1()
+            .gap_2()
+            .bg(cx.theme().title_bar)
+            .border_b_1()
+            .border_color(cx.theme().title_bar_border)
+            .child(
+                div()
+                    .flex()
+                    .when(stacked, gpui_kit::Styled::flex_col)
+                    .flex_1()
+                    .min_w_0()
+                    .gap_x_2()
+                    .when(!cramped, |text| {
+                        text.child(
+                            Self::say("workspace", Role::Heading, title)
+                                .flex_1()
+                                .truncate(),
+                        )
+                    })
+                    .child(
+                        Self::say("save-state", Role::Status, state)
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            .child(Self::tap(
+                cx,
+                Tap::new("go-to", "Go to").named("Go to a file or action"),
+                Self::open_finder,
+            ))
+            .when(keyboard, |header| {
+                header.child(Self::tap(
+                    cx,
+                    Tap::new("hide-keyboard", "Hide keyboard").ghost(),
+                    |_, window, _| window.dismiss_virtual_keyboard(),
+                ))
+            })
+    }
+
     fn work_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let wide = window.viewport_size().width >= px(WIDE);
+        let (covered, keyboard) = Self::covered(window);
+        let width: f32 = (window.viewport_size().width - covered.left - covered.right).into();
+        let layout = Layout::for_width(width);
         let Some(work) = &self.work else {
             return div().into_any_element();
         };
@@ -1664,62 +2306,70 @@ impl Ide {
                 .save_state()
                 .map_or("No changes", SaveState::label)
         };
-        let pane = if wide && self.pane == Pane::Files {
-            Pane::Editor
-        } else {
-            self.pane
+
+        let (main, side) = layout.shown(self.pane, self.side);
+        let current = side.unwrap_or(main);
+        // The extra keys are for typing, so they show where text is typed.
+        let typing = layout == Layout::Large || matches!(main, Pane::Editor | Pane::Terminal);
+        let show_keys = typing && (keyboard || self.keys_always);
+        self.keys_beside_terminal = show_keys && main == Pane::Terminal;
+        let draw = |this: &mut Self, pane: Pane, cx: &mut Context<Self>| match pane {
+            Pane::Files => this.files_pane(cx),
+            Pane::Editor => this.editor_pane(cx),
+            Pane::Terminal => this.terminal_pane(cx),
+            Pane::Changes => this.changes_pane(cx),
+            Pane::More => this.more_pane(cx),
         };
-        let body = match pane {
-            Pane::Files => self.files_pane(cx),
-            Pane::Editor => self.editor_pane(cx),
-            Pane::Terminal => self.terminal_pane(cx),
-            Pane::Changes => self.changes_pane(cx),
-            Pane::More => self.more_pane(cx),
-        };
-        let tabs: Vec<Div> = Pane::ALL
+        let tabs: Vec<Div> = layout
+            .tabs()
             .into_iter()
-            .filter(|tab| !(wide && *tab == Pane::Files))
             .map(|tab| {
                 Self::tap(
                     cx,
-                    Tap::new(format!("tab-{}", tab.label()), tab.label()).tab(tab == pane),
+                    Tap::new(format!("tab-{}", tab.label()), tab.label())
+                        .tab(tab == current)
+                        .tiny(width < 360.0),
                     move |this, _, cx| {
                         this.pane = tab;
+                        if tab.is_side() {
+                            this.side = tab;
+                        }
                         cx.notify();
                     },
                 )
             })
             .collect();
-        let sidebar = wide.then(|| {
+        let sidebar = layout.sidebar_width().map(|sidebar| {
             div()
-                .w(px(320.0))
+                .w(px(sidebar))
+                .flex_none()
                 .h_full()
                 .border_r_1()
                 .border_color(cx.theme().border)
                 .child(self.files_pane(cx))
         });
+        let side_column = side.map(|pane| {
+            div()
+                .w(px(layout.side_width(width).unwrap_or(400.0)))
+                .flex_none()
+                .h_full()
+                .border_l_1()
+                .border_color(cx.theme().border)
+                .child(draw(self, pane, cx))
+        });
+        let body = if self.finder.is_some() {
+            self.finder_pane(cx)
+        } else {
+            draw(self, main, cx)
+        };
+        let keys = show_keys.then(|| self.key_row(width, cx));
+        // With the keyboard up a phone has little room left: the tabs give
+        // way to the extra keys, and come back when the keyboard is put away.
+        let cramped = keyboard && layout == Layout::Compact;
+
         v_flex()
             .size_full()
-            .child(
-                div()
-                    .flex()
-                    .when(!wide, gpui_kit::Styled::flex_col)
-                    .px_3()
-                    .py_2()
-                    .gap_x_2()
-                    .bg(cx.theme().title_bar)
-                    .border_b_1()
-                    .border_color(cx.theme().title_bar_border)
-                    .child(
-                        Self::say("workspace", Role::Heading, title)
-                            .flex_1()
-                            .truncate(),
-                    )
-                    .child(
-                        Self::say("save-state", Role::Status, state)
-                            .text_color(cx.theme().muted_foreground),
-                    ),
-            )
+            .child(Self::header(title, state, layout, keyboard, cx))
             .children(self.notice_bar(cx).map(|bar| div().p_2().child(bar)))
             .child(
                 h_flex()
@@ -1727,18 +2377,20 @@ impl Ide {
                     .min_h_0()
                     .items_stretch()
                     .children(sidebar)
-                    .child(div().flex_1().min_w_0().h_full().child(body)),
+                    .child(div().flex_1().min_w_0().h_full().child(body))
+                    .children(side_column),
             )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .p_1()
-                    .pb_4()
-                    .bg(cx.theme().tab_bar)
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .children(tabs),
-            )
+            .children(keys)
+            .when(!cramped, |screen| {
+                screen.child(
+                    h_flex()
+                        .p_1()
+                        .bg(cx.theme().tab_bar)
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .children(tabs),
+                )
+            })
             .into_any_element()
     }
 }
@@ -1760,11 +2412,20 @@ enum Kind {
 }
 
 /// A button, described once for both the canvas and assistive technology.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent options of a builder"
+)]
 struct Tap {
     key: String,
     label: String,
     kind: Kind,
     disabled: bool,
+    /// What assistive technology calls it, when the label is a symbol.
+    name: Option<String>,
+    keycap: bool,
+    /// For a tab on a very narrow screen: smaller type.
+    tiny: bool,
     /// `Some` makes this a pane tab; the value says whether it is the open one.
     current: Option<bool>,
     fill: bool,
@@ -1779,6 +2440,9 @@ impl Tap {
             label: label.into(),
             kind: Kind::Normal,
             disabled: false,
+            name: None,
+            keycap: false,
+            tiny: false,
             current: None,
             fill: false,
             start: false,
@@ -1808,6 +2472,23 @@ impl Tap {
         self
     }
 
+    fn tiny(mut self, tiny: bool) -> Self {
+        self.tiny = tiny;
+        self
+    }
+
+    fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// One of the extra keys: shares its row equally with the others.
+    fn keycap(mut self) -> Self {
+        self.keycap = true;
+        self.fill = true;
+        self
+    }
+
     /// Left-align the label, for rows in a list.
     fn start(mut self) -> Self {
         self.start = true;
@@ -1822,8 +2503,30 @@ impl Render for Ide {
             Screen::Repos => self.repos_screen(cx),
             Screen::Work => self.work_screen(window, cx),
         };
+        let (covered, _) = Self::covered(window);
         div()
             .size_full()
+            // Control held on the extra keys applies to the next key pressed.
+            // Keys that type a character are caught by the page before they
+            // get here (`platform::watch_typing`); this catches the rest,
+            // such as an arrow or Enter on an attached keyboard.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let Some(target) = this.take_control() else {
+                    return;
+                };
+                cx.notify();
+                let keys = &event.keystroke;
+                if keys.modifiers.control || keys.modifiers.alt || keys.modifiers.platform {
+                    return;
+                }
+                let key = keys.key.clone();
+                cx.stop_propagation();
+                this.send_key(target, &key, true, window, cx);
+            }))
+            .pt(covered.top)
+            .pl(covered.left)
+            .pr(covered.right)
+            .pb(covered.bottom)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .line_height(relative(1.5))

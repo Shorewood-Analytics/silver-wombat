@@ -246,7 +246,13 @@ async function run(pyodide, job, progress) {
       }
       const micropip = pyodide.pyimport("micropip");
       try {
-        await micropip.install(job.install);
+        // A Python list, not a JavaScript array seen from Python.
+        const wanted = pyodide.toPy(job.install);
+        try {
+          await micropip.install(wanted);
+        } finally {
+          wanted.destroy();
+        }
       } finally {
         micropip.destroy();
       }

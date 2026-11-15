@@ -9,6 +9,167 @@ use wasm_bindgen_futures::JsFuture;
 
 const API: &str = "https://api.github.com";
 
+/// Whether the person has pinch-zoomed the page. Zooming and an on-screen
+/// keyboard both shrink what the browser calls the visual viewport, and only
+/// the keyboard should make the interface rearrange itself: someone who zooms
+/// in to read wants the page bigger, not re-fitted to the smaller view.
+pub fn zoomed() -> bool {
+    web_sys::window()
+        .and_then(|window| window.visual_viewport())
+        .is_some_and(|viewport| viewport.scale() > 1.01)
+}
+
+/// A touch in progress: which finger, and where and when it went down.
+#[derive(Clone, Copy)]
+struct Touch {
+    id: i32,
+    x: f64,
+    y: f64,
+    at: f64,
+}
+
+/// Calls `on_touch` for every single-finger touch that ends, with where it
+/// started, how far it moved and how long it took: `(start_x, dx, dy,
+/// milliseconds)`. Deciding whether that was a swipe is the caller's job.
+/// The listeners only watch; the touch still reaches the canvas.
+pub fn watch_touches(on_touch: impl Fn(f32, f32, f32, f32) + 'static) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use web_sys::PointerEvent;
+
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let down: Rc<Cell<Option<Touch>>> = Rc::new(Cell::new(None));
+    let options = web_sys::AddEventListenerOptions::new();
+    options.set_capture(true);
+    options.set_passive(true);
+    let listen = |name: &str, handler: Box<dyn FnMut(PointerEvent)>| {
+        let handler = Closure::wrap(handler);
+        let _ = document.add_event_listener_with_callback_and_add_event_listener_options(
+            name,
+            handler.as_ref().unchecked_ref(),
+            &options,
+        );
+        // Lives as long as the page.
+        handler.forget();
+    };
+
+    let state = down.clone();
+    listen(
+        "pointerdown",
+        Box::new(move |event: PointerEvent| {
+            if event.pointer_type() != "touch" {
+                return;
+            }
+            // A second finger makes it a pinch, not a swipe.
+            state.set(match state.get() {
+                None => Some(Touch {
+                    id: event.pointer_id(),
+                    x: f64::from(event.client_x()),
+                    y: f64::from(event.client_y()),
+                    at: event.time_stamp(),
+                }),
+                Some(_) => None,
+            });
+        }),
+    );
+    let state = down.clone();
+    listen(
+        "pointerup",
+        Box::new(move |event: PointerEvent| {
+            let Some(touch) = state.take() else {
+                return;
+            };
+            if event.pointer_id() != touch.id {
+                return;
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "screen distances and short times fit"
+            )]
+            on_touch(
+                touch.x as f32,
+                (f64::from(event.client_x()) - touch.x) as f32,
+                (f64::from(event.client_y()) - touch.y) as f32,
+                (event.time_stamp() - touch.at) as f32,
+            );
+        }),
+    );
+    listen(
+        "pointercancel",
+        Box::new(move |_: PointerEvent| down.set(None)),
+    );
+}
+
+/// While `held` is set, catches the next single character typed, by an
+/// on-screen or an attached keyboard, before it reaches a text field, and
+/// gives it to `on_character` instead. Used for the extra keys' Control: the
+/// character becomes a Control key and is never typed.
+///
+/// The browser announces text about to be inserted with a `beforeinput`
+/// event, which can be cancelled; that is what this listens for.
+pub fn watch_typing(
+    held: std::rc::Rc<std::cell::Cell<bool>>,
+    on_character: impl Fn(String) + 'static,
+) {
+    use wasm_bindgen::closure::Closure;
+    use web_sys::InputEvent;
+
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let handler = Closure::<dyn FnMut(InputEvent)>::new(move |event: InputEvent| {
+        // Text being composed (an input method, dictation) is left alone.
+        if !held.get() || event.is_composing() {
+            return;
+        }
+        let Some(typed) = event.data() else { return };
+        if typed.chars().count() != 1 {
+            return;
+        }
+        event.prevent_default();
+        event.stop_propagation();
+        held.set(false);
+        on_character(typed);
+    });
+    let _ = document.add_event_listener_with_callback_and_bool(
+        "beforeinput",
+        handler.as_ref().unchecked_ref(),
+        true,
+    );
+    // Lives as long as the page.
+    handler.forget();
+}
+
+/// Calls `on_shortcut` when Control+K or Command+K is pressed, whatever has
+/// the keyboard's focus. The key goes no further: browsers give it no
+/// meaning of their own inside a page.
+pub fn watch_finder_shortcut(on_shortcut: impl Fn() + 'static) {
+    use wasm_bindgen::closure::Closure;
+    use web_sys::KeyboardEvent;
+
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let handler = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        let chord = (event.ctrl_key() || event.meta_key()) && !event.alt_key();
+        if chord && event.key().eq_ignore_ascii_case("k") {
+            event.prevent_default();
+            event.stop_propagation();
+            on_shortcut();
+        }
+    });
+    let _ = document.add_event_listener_with_callback_and_bool(
+        "keydown",
+        handler.as_ref().unchecked_ref(),
+        true,
+    );
+    // Lives as long as the page.
+    handler.forget();
+}
+
 fn describe(value: &JsValue) -> String {
     value
         .dyn_ref::<js_sys::Error>()

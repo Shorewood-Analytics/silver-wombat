@@ -15,6 +15,28 @@ There is no server: the page talks straight to the GitHub API with your token.
 - Commit all changes as one commit. Before writing, the app fetches the branch and refuses if any changed file differs on GitHub from what you started with. Nothing is overwritten.
 - A terminal that runs in the browser on the open repository: `ls`, `cd`, `cat`, `head`, `tail`, `wc`, `grep`, `find`, `echo`, `touch`, `rm`, `mv`, `cp`, `open`, `save`, and `git status | diff | commit -m | log | branch | switch | restore | pull`, with pipes, `&&`, `;`, `>` and `>>`.
 - Python 3.12, 3.13, 3.14 and 3.15 in that terminal, running in the browser tab. See [Python](#python).
+- **Go to**: type a few letters of a file's name, or of an action, and pick it. Control+K or Command+K with a keyboard attached.
+- A row of extra keys for typing code on a phone, and layouts for a phone, an open iPhone Duo and an iPad Pro. See [Phone and tablet](#phone-and-tablet).
+
+## Phone and tablet
+
+**Extra keys.** When the on-screen keyboard is up in the editor or the terminal, a row above it adds the keys it lacks: Esc, Tab, the four arrows and Ctrl, then three more groups of punctuation that code needs and the iOS keyboard buries (`{ } [ ] ( ) =`, `< > | \ _ # \``, `" ' : ; / - +`). The last key of each group shows the next. Ctrl applies to the next key, typed or tapped: Ctrl then Z undoes. In the terminal, Tab completes, Up and Down walk the history, Ctrl+C stops and Ctrl+L clears. More > Extra keys shows the row all the time, for use with a switch, a pointer or another on-screen keyboard.
+
+**Layouts.** The width decides, and it follows rotation, unfolding and Split View live:
+
+| Width | Devices | What shows |
+| --- | --- | --- |
+| under 600 points | iPhone; iPhone Duo folded (about 466) | one pane, five tabs |
+| 600 to 1099 | iPhone Duo open (about 626, or 890 on its side); iPad upright | the file list beside one pane |
+| 1100 and up | iPad Pro on its side (1210 or 1376) | file list, editor, and a third column for terminal, changes or settings |
+
+The iPhone Duo widths are worked out from Apple's published pixel counts at 3x. They are not published as points.
+
+**Edges and the keyboard.** Nothing is drawn under the notch, the rounded corners or the home indicator. When the keyboard opens, the interface moves up to sit above it; on a phone the tabs give way to the extra keys until the keyboard is put away (Hide keyboard, top right). Pinch-zoom magnifies the page and rearranges nothing.
+
+**Swipe.** A quick sideways swipe moves to the next or previous pane, the same as tapping its tab. It can be switched off in More. Slow drags, swipes from the screen's edge and two-finger gestures are ignored.
+
+**Not yet tried on a device.** All of this is tested in desktop Chrome with a phone-sized window, touch events, an emulated notch and emulated zoom. The on-screen keyboard's behaviour in Safari cannot be emulated there, so the part that moves the interface above the keyboard has not run at all outside unit tests of its arithmetic.
 
 ## Python
 
@@ -63,7 +85,7 @@ Known gaps: a screen reader hears the end of the terminal output and of a diff, 
 
 ## What does not work yet
 
-- No code completion, no keyboard accessory row.
+- No code completion.
 - Apart from Python, the terminal has no machine behind it. `cargo`, `npm` and other programs answer "not available".
 - Local changes are kept in the browser's origin-private file system (Safari 26 or later; older browsers fall back to `localStorage`, about 5 MB). The app asks the browser not to evict it, but the browser may refuse, so the GitHub checkpoint is the durable copy. More > Export writes all changes to a patch file that `git apply` accepts.
 - GitHub sign-in with a browser redirect is not possible from a static page: GitHub's login endpoints do not allow cross-origin browser requests. A token is the only way in.

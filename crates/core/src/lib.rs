@@ -14,8 +14,10 @@ pub mod error;
 pub mod fake;
 pub mod github;
 pub mod http;
+pub mod palette;
 pub mod path;
 pub mod python;
+pub mod screen;
 pub mod shell;
 
 pub mod workspace;

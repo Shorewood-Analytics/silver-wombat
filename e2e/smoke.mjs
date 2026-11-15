@@ -61,7 +61,16 @@ page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 
 let failures = 0;
 function check(condition, what) {
   console.log(`${condition ? "ok  " : "FAIL"} ${what}`);
-  if (!condition) failures += 1;
+  if (!condition) {
+    failures += 1;
+    // What the terminal last said often explains a failure.
+    page
+      .locator('#a11y [role="log"]')
+      .first()
+      .textContent({ timeout: 2_000 })
+      .then((text) => text && console.log(`     after "${what}", the terminal's last lines were:\n${text.trimEnd().split("\n").slice(-14).map((line) => `       | ${line}`).join("\n")}`))
+      .catch(() => {});
+  }
 }
 const layer = page.locator("#a11y");
 const button = (name) => layer.getByRole("button", { name, exact: true });
@@ -239,6 +248,141 @@ try {
     check(await says("A library could not be downloaded"), "with no connection, a missing library is reported plainly");
   }
   await scan("terminal after Python");
+
+  // --- Extra keys: the row an on-screen keyboard lacks ---
+  await press("More");
+  await press("Extra keys (Esc, Tab, arrows, symbols): shown with the on-screen keyboard. Show always");
+  await press("Terminal");
+  check(await eventually(async () => (await button("Escape").count()) === 1), "the extra keys show in the terminal once switched on");
+  check((await button("Complete").count()) === 0 && (await button("Stop").count()) === 1, "beside them the terminal drops its own Complete, Previous and Next, and keeps Stop");
+  await runLine("clear");
+  await typeInto("Command", "ech");
+  await press("Tab");
+  await page.keyboard.type("from the keys", { delay: 10 });
+  await press("Run");
+  check(await says("from the keys", 15_000), "the Tab key completes a command (ech became echo)");
+  await press("Up");
+  await press("Run");
+  check(await eventually(async () => (await heard("log")).some((text) => text.split("from the keys").length >= 5)), "the Up key brings back the last command");
+  await press("Control");
+  check(await eventually(async () => (await button("Control, on").count()) === 1), "Control says that it is on");
+  await page.keyboard.type("l");
+  check(await eventually(async () => (await heard("log")).every((text) => !text.includes("from the keys"))), "Control then L clears the terminal");
+  check((await field("Command").count()) === 1 && (await button("Control").count()) === 1, "and Control is off again");
+
+  await runLine("echo abc > keys.txt && open keys.txt");
+  await typeInto("Code editor, /keys.txt", "12");
+  await press("Left");
+  await page.keyboard.type("X");
+  await press("More keys");
+  await press("Left brace");
+  await settle(1500);
+  await press("Terminal");
+  await runLine("cat keys.txt");
+  check(await says("1X{2abc", 15_000), "in the editor the Left key moves the cursor and a symbol key types its symbol");
+  await press("Editor");
+  await typeInto("Code editor, /keys.txt", "");
+  for (let i = 0; i < 3; i += 1) await press("More keys");
+  await press("Control");
+  await page.keyboard.type("a");
+  await page.keyboard.type("Z");
+  await settle(1500);
+  await press("Terminal");
+  await runLine("clear");
+  await runLine("cat keys.txt");
+  check(await eventually(async () => (await heard("log")).some((text) => /^Z$/m.test(text) && !text.includes("abc"))), "Control then A selects everything (typing Z replaced the file's text)");
+  await press("Editor");
+  await typeInto("Code editor, /keys.txt", "");
+  await press("Control");
+  await page.keyboard.type("z");
+  await settle(1500);
+  await press("Terminal");
+  await runLine("clear");
+  await runLine("cat keys.txt");
+  check(await says("1X{2abc", 15_000), "Control then Z undoes (the replaced text is back)");
+  await scan("terminal with the extra keys");
+
+  // --- Wider screens: an open iPhone Duo, then an iPad Pro on its side ---
+  const names = () => layer.locator("button").evaluateAll((all) => all.map((e) => e.getAttribute("aria-label") ?? e.textContent));
+  await page.setViewportSize({ width: 626, height: 890 });
+  check(await eventually(async () => !(await names()).includes("Files")), "at 626 points wide the Files tab goes away");
+  check((await button("Up one folder").count()) + (await button("Folder app").count()) >= 1 && (await field("Command").count()) === 1, "because the file list now sits beside the open pane");
+  await scan("626 wide");
+  await page.setViewportSize({ width: 1376, height: 1032 });
+  check(await eventually(async () => !(await names()).includes("Editor")), "at 1376 points wide the Editor tab goes away too");
+  check((await field("Code editor, /keys.txt").count()) === 1 && (await field("Command").count()) === 1, "because the editor and the terminal are both in view");
+  await press("Changes");
+  check(await eventually(async () => (await field("Code editor, /keys.txt").count()) === 1 && (await field("Commit message").count()) === 1), "choosing Changes swaps the third column and leaves the editor");
+  await scan("1376 wide");
+  await page.setViewportSize({ width: 390, height: 844 });
+  check(await eventually(async () => (await names()).includes("Files")), "back at phone width the Files tab returns");
+
+  // --- The notch, the home indicator, and pinch-zoom ---
+  const edges = () => page.evaluate(() => {
+    const all = [...document.querySelectorAll("#a11y > *")].map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0);
+    return { top: Math.min(...all.map((r) => r.top)), bottom: Math.max(...all.map((r) => r.bottom)), right: Math.max(...all.map((r) => r.right)) };
+  });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { top: 59, bottom: 34, left: 0, right: 0 } });
+  check(await eventually(async () => { const e = await edges(); return e.top >= 59 && e.bottom <= 844 - 34; }), "with a 59-point notch and a 34-point home indicator, nothing is drawn under either");
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: {} });
+  check(await eventually(async () => (await edges()).top < 59), "and the space is used again when they are gone");
+  const before = await edges();
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await settle(1500);
+  const zoomed = await page.evaluate(() => visualViewport.scale);
+  const after = await edges();
+  check(zoomed === 2 && after.right === before.right && after.bottom === before.bottom && (await button("Hide keyboard").count()) === 0, "pinch-zoom magnifies the page and the interface does not rearrange itself");
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+
+  // --- Finder: reach any file or action by typing a few letters ---
+  const finder = () => field("Find a file or action").count();
+  await press("Go to a file or action");
+  check(await eventually(async () => (await finder()) === 1), "Go to opens the finder");
+  await page.keyboard.type("grpy", { delay: 20 });
+  await press("Open /app/greet.py");
+  check(await eventually(async () => (await field("Code editor, /app/greet.py").count()) === 1), "typing grpy finds app/greet.py, and choosing it opens the file");
+  await page.keyboard.press("Control+k");
+  check(await eventually(async () => (await finder()) === 1), "Control+K opens the finder from a keyboard");
+  await page.keyboard.type("term", { delay: 20 });
+  await settle(500);
+  await page.keyboard.press("Enter");
+  check(await eventually(async () => (await field("Command").count()) === 1 && (await finder()) === 0), "Enter takes the first match (Go to Terminal)");
+  await page.keyboard.press("Control+k");
+  await eventually(async () => (await finder()) === 1);
+  await page.keyboard.press("Escape");
+  check(await eventually(async () => (await finder()) === 0), "Escape closes the finder");
+  await runLine("clear");
+  await press("Go to a file or action");
+  await page.keyboard.type("run open", { delay: 20 });
+  await press("Run the open file with Python");
+  check((await says("python '/app/greet.py'", 15_000)) && (await eventually(async () => !(await button("Run").isDisabled()), 60_000)) && (await heard("log")).every((text) => !text.includes("can't open")), "an action can be found the same way (Run the open file with Python)");
+  await scan("finder and header");
+
+  // --- Swipe between panes (a touch gesture; the tabs do the same) ---
+  // The touch carries its own clock, so how long it "took" does not depend
+  // on how fast this machine is.
+  const swipe = async (fromX, toX, seconds = 0.15) => {
+    const start = Date.now() / 1000;
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: fromX, y: 300 }], timestamp: start });
+    for (const part of [0.5, 1]) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: fromX + (toX - fromX) * part, y: 300 }], timestamp: start + seconds * part * 0.9 });
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [], timestamp: start + seconds });
+    await settle(600);
+  };
+  await swipe(320, 120);
+  check(await eventually(async () => (await field("Commit message").count()) + (await layer.getByRole("heading", { name: "Nothing changed since the last commit." }).count()) >= 1 && (await field("Command").count()) === 0, 5_000), "a quick swipe to the left goes from Terminal to Changes");
+  await swipe(120, 320);
+  check(await eventually(async () => (await field("Command").count()) === 1, 5_000), "a swipe to the right goes back to Terminal");
+  await swipe(320, 120, 1.5);
+  check((await field("Command").count()) === 1, "a slow drag is not a swipe");
+  await swipe(8, 240);
+  check((await field("Command").count()) === 1, "nor is a swipe from the screen's edge, which is Safari's Back");
+  await press("More");
+  await press("Swipe sideways to change pane: on. Turn off");
+  await swipe(120, 320);
+  check((await button("Swipe sideways to change pane: off. Turn on").count()) === 1, "swiping can be switched off, and then a swipe does nothing");
 
   check(errors.length === 0, `no errors in the browser console${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
 } catch (error) {
