@@ -93,6 +93,13 @@ cargo xtask check
 
 The first line covers `core` and `xtask`. `cargo xtask check` lints the app for the browser target.
 
+To check the GitHub client against the real API (it creates two branches named `live-test/...` and `autosave/live-test/...` in the repository you name, and touches nothing else):
+
+```sh
+SILVER_WOMBAT_LIVE_REPO=owner/name GITHUB_TOKEN=... \
+    cargo test -p silver-wombat-core --test live -- --ignored --nocapture
+```
+
 To run the built site in a real browser and operate it end to end (needs Chrome and Node):
 
 ```sh

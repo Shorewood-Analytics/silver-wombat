@@ -26,8 +26,12 @@ impl FetchHttp {
 
     async fn fetch(&self, request: Request) -> Result<Response, JsValue> {
         let headers = web_sys::Headers::new()?;
+        // A browser asks GitHub's permission before sending any header outside
+        // a short list. GitHub's CORS documentation names the ones it permits:
+        // Authorization and Content-Type are on it, X-GitHub-Api-Version is
+        // not. So no version header is sent; GitHub then uses its default
+        // version, 2022-11-28, which is the one this client was written for.
         headers.set("Accept", "application/vnd.github+json")?;
-        headers.set("X-GitHub-Api-Version", "2022-11-28")?;
         headers.set("Authorization", &format!("Bearer {}", self.token))?;
         let init = web_sys::RequestInit::new();
         init.set_method(request.method.as_str());

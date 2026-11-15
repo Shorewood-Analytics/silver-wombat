@@ -1,7 +1,8 @@
 //! A small typed client for the GitHub REST calls the IDE makes.
 //!
-//! Every endpoint used here was checked against the live API on 2026-11-15
-//! (version header `2022-11-28`). Writes go through the Git Data API so that
+//! Written for REST API version `2022-11-28`, the version GitHub uses when a
+//! request names none (the browser client cannot name one; see the app's
+//! `platform.rs`). Writes go through the Git Data API so that
 //! one checkpoint is one commit no matter how many files it touches.
 
 use std::fmt::Write as _;
