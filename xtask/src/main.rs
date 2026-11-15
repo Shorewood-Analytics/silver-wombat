@@ -119,8 +119,7 @@ fn dist(args: &[String]) -> Result<(), String> {
     let root = root();
     check_bindgen(&root)?;
 
-    run(Command::new(env!("CARGO"))
-        .current_dir(&root)
+    run(app_cargo(&root)
         .args([
             "build",
             "--package",
@@ -131,9 +130,7 @@ fn dist(args: &[String]) -> Result<(), String> {
             profile,
         ])
         .args(cargo_args))
-    .map_err(|error| {
-        format!("{error}\nIf the target is missing, run: rustup target add {TARGET}")
-    })?;
+    .map_err(|error| format!("{error}\n{}", toolchain_hint()))?;
 
     // Cargo names the output folder "debug" for the dev profile.
     let folder = if profile == "dev" { "debug" } else { profile };

@@ -134,7 +134,7 @@ fn workspace_against_real_github() {
     );
     assert_eq!(
         block_on(github.commit(&repo, &checkpoint)).unwrap().parents,
-        [base.clone()]
+        std::slice::from_ref(&base)
     );
     // The branch itself has not moved.
     assert_eq!(
