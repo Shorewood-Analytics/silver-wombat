@@ -6,5 +6,10 @@
 - Before committing, run:
 
 ```sh
-cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test
+cargo xtask check
 ```
+
+- The first line covers `crates/core` and `xtask` on stable Rust. `cargo xtask check` lints `crates/app` for the browser with the pinned nightly toolchain (see `README.md`).
+- `crates/core` has no UI and no browser dependency. Put logic there and test it natively; keep `crates/app` to drawing and wiring.
+- The app must never report a change as saved before the write that makes it so has succeeded (see `crates/core/src/workspace.rs`).

@@ -42,14 +42,60 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup component add clippy rustfmt
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
+      # Root commands cover the crates that build on any machine (core, xtask).
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # The browser app: lint it for the WASM target and build the static site.
+  app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Keep in step with APP_TOOLCHAIN in xtask/src/main.rs.
+      APP_TOOLCHAIN: nightly-2026-10-31
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the app toolchain
+        run: rustup toolchain install "$APP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown --component clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/wasm-bindgen
+            target
+          key: app-${{ runner.os }}-${{ env.APP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            app-${{ runner.os }}-${{ env.APP_TOOLCHAIN }}-
+      - name: Install wasm-bindgen at the version in Cargo.lock
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          test -n "$version" || { echo "::error::no wasm-bindgen entry in Cargo.lock"; exit 1; }
+          if ! wasm-bindgen --version 2>/dev/null | grep -qx "wasm-bindgen $version"; then
+            cargo install wasm-bindgen-cli --version "$version" --locked --force
+          fi
+      - run: cargo xtask check
+      - run: cargo xtask dist
+      - name: The site has every file it needs
+        run: |
+          for file in index.html boot.js app.css silver_wombat_app.js silver_wombat_app_bg.wasm; do
+            test -s "dist/$file" || { echo "::error::dist/$file is missing or empty"; exit 1; }
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 14
 
   # The single required check in the branch ruleset. It passes only if every job above passed.
   ci:
     if: always()
-    needs: [repo, rust]
+    needs: [repo, rust, app]
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = false

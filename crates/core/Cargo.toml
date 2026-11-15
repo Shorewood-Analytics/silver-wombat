@@ -3,7 +3,6 @@ name = "silver-wombat-core"
 description = "GitHub-backed workspace, continuous save and shell for the silver-wombat browser IDE"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 publish = false
 
 [lints]

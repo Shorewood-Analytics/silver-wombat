@@ -1,15 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/app", "crates/core"]
+members = ["crates/app", "crates/core", "xtask"]
 # The app crate only targets the browser. Plain `cargo test` and `cargo clippy`
 # at the root cover the crates that build on this machine; `cargo xtask check`
 # covers the app.
-default-members = ["crates/core"]
+default-members = ["crates/core", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
 repository = "https://github.com/Shorewood-Analytics/silver-wombat"
 
 [workspace.lints.clippy]

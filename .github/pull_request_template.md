@@ -6,7 +6,8 @@ Closes #
 
 ## How to verify
 
-- [ ] `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test`
+- [ ] `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test`
+- [ ] `cargo xtask check`
 
 ## Notes
 

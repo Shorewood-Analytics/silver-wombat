@@ -3,7 +3,6 @@ name = "silver-wombat-app"
 description = "GPUI front end of the silver-wombat browser IDE"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 publish = false
 
 [lib]
@@ -12,9 +11,26 @@ crate-type = ["cdylib", "rlib"]
 [lints]
 workspace = true
 
-[dependencies]
-gpui-kit = { version = "=0.9.1", features = ["syntect"] }
-
+# The app only runs in a browser. Keeping every dependency behind the wasm cfg
+# makes a native build of this crate empty, so plain `cargo` commands at the
+# workspace root never need GPUI's desktop system libraries.
 [target.'cfg(target_family = "wasm")'.dependencies]
+silver-wombat-core = { path = "../core" }
+gpui-kit = { version = "=0.9.1", features = ["syntect"] }
 console_error_panic_hook = "0.1"
+js-sys = "0.3"
+serde_json = "1"
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "Document",
+  "Element",
+  "Headers",
+  "Request",
+  "RequestCache",
+  "RequestInit",
+  "RequestMode",
+  "Response",
+  "Storage",
+  "Window",
+] }

@@ -2,8 +2,16 @@
 // Everything else is Rust. A failure is shown on the page, not only in the console.
 const status = document.getElementById("status");
 
+let crashed = false;
+
 function fail(error) {
   console.error(error);
+  // A Rust panic has already written its own, more useful message.
+  if (crashed || status.textContent.startsWith("The editor stopped")) {
+    crashed = true;
+    status.hidden = false;
+    return;
+  }
   status.hidden = false;
   status.textContent =
     "The editor could not start.\n\n" +
@@ -18,7 +26,7 @@ try {
   const app = await import("./silver_wombat_app.js");
   await app.default();
   app.run();
-  status.hidden = true;
+  if (!status.textContent.startsWith("The editor stopped")) status.hidden = true;
 } catch (error) {
   fail(error);
 }
