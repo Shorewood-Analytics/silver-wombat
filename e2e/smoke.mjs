@@ -60,16 +60,34 @@ const field = (name) => layer.getByRole("textbox", { name, exact: true });
 const settle = (ms = 700) => page.waitForTimeout(ms);
 // A screen reader activates an element by sending it a click.
 async function press(name) {
+  // Wait for the button to exist and be enabled: a previous action may still be running.
+  await eventually(async () => (await button(name).count()) === 1 && !(await button(name).isDisabled()));
   await button(name).dispatchEvent("click");
-  await settle();
+  await settle(300);
 }
 async function typeInto(name, text) {
+  await eventually(async () => (await field(name).count()) === 1);
   await field(name).dispatchEvent("click");
   await settle(300);
   await page.keyboard.type(text, { delay: 10 });
   await settle(300);
 }
 const heard = (role) => layer.getByRole(role).allTextContents();
+// Waits for something to become true instead of sleeping a fixed time, so a
+// slow machine does not fail the test.
+async function eventually(probe, timeout = 15_000) {
+  const end = Date.now() + timeout;
+  for (;;) {
+    try {
+      if (await probe()) return true;
+    } catch {
+      // The element may not exist yet; try again.
+    }
+    if (Date.now() > end) return false;
+    await page.waitForTimeout(200);
+  }
+}
+const hears = (role, test) => eventually(async () => (await heard(role)).some(test));
 async function waitForStatus(text, timeout) {
   try {
     await layer.getByRole("status").filter({ hasText: text }).first().waitFor({ state: "attached", timeout });
@@ -110,7 +128,7 @@ try {
   check(outline === "solid", "keyboard focus has a visible outline");
   await page.keyboard.press("Enter");
   await settle(1500);
-  check((await heard("heading")).some((text) => text.includes("demo/hello-python")), "Enter on the focused button opened the demo repository");
+  check(await hears("heading", (text) => text.includes("demo/hello-python")), "Enter on the focused button opened the demo repository");
 
   // --- Files ---
   await scan("files");
@@ -118,12 +136,12 @@ try {
   const box = await button("Folder app").evaluate((e) => e.getBoundingClientRect().toJSON());
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
   await settle(1000);
-  check((await heard("heading")).includes("Folder /app"), "a tap at an element's centre reaches the control under it");
+  check(await hears("heading", (text) => text === "Folder /app"), "a tap at an element's centre reaches the control under it");
 
   // --- Editor and the three save states ---
   await press("main.py");
   await settle(800);
-  check((await field("Code editor, /app/main.py").count()) === 1, "the editor opened /app/main.py");
+  check(await eventually(async () => (await field("Code editor, /app/main.py").count()) === 1), "the editor opened /app/main.py");
   check((await heard("status")).every((text) => text === "No changes"), "an unedited file says: No changes");
   await typeInto("Code editor, /app/main.py", "# edited by the smoke test\n");
   check(await waitForStatus("Saved on this device", 5_000), "after typing: Saved on this device");
@@ -135,27 +153,23 @@ try {
   await typeInto("Command", "grep -c 'smoke test' app/main.py && git status");
   await page.keyboard.press("Enter");
   await settle(1500);
-  const log = (await heard("log")).join("\n");
-  check(/^1$/m.test(log), "the terminal sees the edit (grep -c printed 1)");
-  check(log.includes("modified: app/main.py"), "git status lists the file as modified");
+  check(await hears("log", (text) => /^1$/m.test(text)), "the terminal sees the edit (grep -c printed 1)");
+  check(await hears("log", (text) => text.includes("modified: app/main.py")), "git status lists the file as modified");
   await typeInto("Command", "python app/main.py");
   await press("Run");
-  await settle(800);
-  check((await heard("log")).join("\n").includes("not available"), "an unsupported program says it is not available");
+  check(await hears("log", (text) => text.includes("python: not available")), "an unsupported program says it is not available");
   await scan("terminal");
 
   // --- Changes: diff, commit ---
   await press("Changes");
-  check((await heard("heading")).includes("1 changed file"), "Changes lists 1 changed file");
+  check(await hears("heading", (text) => text === "1 changed file"), "Changes lists 1 changed file");
   await press("Show diff of /app/main.py");
-  await settle(800);
-  check((await layer.locator('[data-key="diff-text"]').textContent()).includes("+# edited by the smoke test"), "the diff shows the added line");
+  check(await eventually(async () => (await layer.locator('[data-key="diff-text"]').textContent()).includes("+# edited by the smoke test")), "the diff shows the added line");
   await scan("changes");
   await typeInto("Commit message", "Edit from the smoke test");
   await press("Commit to main");
-  await settle(1500);
-  check((await heard("status")).some((text) => text.startsWith("Committed 1 file to main")), "the commit is confirmed");
-  check((await heard("heading")).includes("Nothing changed since the last commit."), "after the commit nothing is left to commit");
+  check(await hears("status", (text) => text.startsWith("Committed 1 file to main")), "the commit is confirmed");
+  check(await hears("heading", (text) => text === "Nothing changed since the last commit."), "after the commit nothing is left to commit");
 
   // --- Recovery: an edit saved on the device survives a reload ---
   await press("Terminal");
@@ -164,14 +178,18 @@ try {
   check(await waitForStatus("Saved on this device", 5_000), "a file written from the terminal is saved on the device");
   await openDemo();
   await press("Try the demo (no account)");
-  await settle(1500);
-  check((await heard("status")).some((text) => text.startsWith("Restored 1 unsaved change")), "after a reload the unsaved change is restored and announced");
-  check((await button("notes.txt  (new)").count()) === 1, "the restored file is in the file list, marked new");
+  check(await hears("status", (text) => text.startsWith("Restored 1 unsaved change")), "after a reload the unsaved change is restored and announced");
+  check(await eventually(async () => (await button("notes.txt  (new)").count()) === 1), "the restored file is in the file list, marked new");
 
-  // --- Settings ---
+  // --- Settings, storage and export ---
   await press("More");
+  check(await hears("paragraph", (text) => text.includes("kept in this browser's file storage")), "unsaved work is kept in the browser's file storage (OPFS)");
+  const download = page.waitForEvent("download", { timeout: 10_000 });
+  await press("Export changes as a patch file");
+  const patch = await readFile(await (await download).path(), "utf8");
+  check(patch.includes("diff --git a/notes.txt b/notes.txt") && patch.includes("+keep me"), "the exported patch file contains the unsaved change");
   await press("Theme: Dark. Switch to Midnight");
-  check((await button("Theme: Midnight. Switch to Dark").count()) === 1, "the theme switches to Midnight");
+  check(await eventually(async () => (await button("Theme: Midnight. Switch to Dark").count()) === 1), "the theme switches to Midnight");
   await scan("more");
 
   check(errors.length === 0, `no errors in the browser console${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);

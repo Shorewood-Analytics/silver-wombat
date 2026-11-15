@@ -23,7 +23,7 @@ use silver_wombat_core::workspace::{
 };
 
 use crate::mirror::{self, Action, Role};
-use crate::platform::{self, FetchHttp};
+use crate::platform::{self, FetchHttp, Kept};
 use crate::theme::{self, Look, MONO, SANS};
 
 const KEY_TOKEN: &str = "silver-wombat.token";
@@ -104,6 +104,11 @@ pub struct Ide {
     mono: bool,
     busy: bool,
     notice: Option<String>,
+    /// Where unsaved work went the last time it was saved on this device.
+    kept: Option<Kept>,
+    /// The browser's answer to "do not evict this site's storage".
+    persistent: Option<bool>,
+    asked_persistence: bool,
     session: Option<Session>,
     repos: Vec<Repo>,
     work: Option<Work>,
@@ -227,6 +232,9 @@ impl Ide {
             mono,
             busy: false,
             notice: None,
+            kept: None,
+            persistent: None,
+            asked_persistence: false,
             session: None,
             repos: Vec::new(),
             work: None,
@@ -389,16 +397,22 @@ impl Ide {
             let result = async {
                 let workspace = Workspace::open(github, &full_name, &branch).await?;
                 let mut restored = 0;
-                if let Some(saved) = platform::load(&drafts_key(&workspace, demo)) {
+                let mut found_in = None;
+                if let Some((saved, place)) = platform::recall(&drafts_key(&workspace, demo)).await
+                {
                     // Saved changes that cannot be read are reported, not dropped silently.
                     restored = workspace.import_drafts(&saved)?;
+                    found_in = Some(place);
                 }
                 let entries = workspace.list_dir("").await?;
-                Ok::<_, Error>((workspace, restored, entries))
+                Ok::<_, Error>((workspace, restored, found_in, entries))
             }
             .await;
             this.update_in(cx, |this, window, cx| match result {
-                Ok((workspace, restored, entries)) => {
+                Ok((workspace, restored, found_in, entries)) => {
+                    if found_in.is_some() {
+                        this.kept = found_in;
+                    }
                     this.work = Some(Work {
                         workspace: Rc::new(workspace),
                         shell: Rc::new(Shell::new()),
@@ -547,14 +561,31 @@ impl Ide {
                 return;
             }
             let (revision, json) = workspace.export_drafts();
-            let saved = platform::save(&drafts_key(&workspace, demo), &json);
+            let kept = platform::keep(&drafts_key(&workspace, demo), &json).await;
+            // After the first successful save, ask the browser once not to
+            // evict this site's storage when the device runs low on space.
+            let ask = kept.is_ok()
+                && this
+                    .update(cx, |this, _| {
+                        !std::mem::replace(&mut this.asked_persistence, true)
+                    })
+                    .unwrap_or(false);
+            let persistent = if ask {
+                platform::request_persistence().await
+            } else {
+                None
+            };
             this.update(cx, |this, cx| {
+                if ask {
+                    this.persistent = persistent;
+                }
                 if let Some(work) = &mut this.work {
-                    match &saved {
-                        Ok(()) => {
+                    match &kept {
+                        Ok(place) => {
                             // Only now is it true that the device has the changes.
                             workspace.mark_on_device(revision);
                             work.device_error = None;
+                            this.kept = Some(*place);
                         }
                         Err(reason) => work.device_error = Some(reason.clone()),
                     }
@@ -820,6 +851,35 @@ impl Ide {
                         }
                         this.changed(window, cx);
                         this.refresh_files(window, cx);
+                    }
+                    Err(error) => this.fail(&error, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn export_patch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let workspace = work.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = workspace.patch().await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(patch) => {
+                        let name = format!(
+                            "{}-{}.patch",
+                            workspace.repo().replace('/', "-"),
+                            workspace.branch().replace('/', "-")
+                        );
+                        this.notice = Some(match platform::download(&name, &patch) {
+                            Ok(()) => format!(
+                                "Exported your changes as {name}. Apply it on a computer with: git apply {name}"
+                            ),
+                            Err(reason) => format!("Could not export the changes: {reason}"),
+                        });
                     }
                     Err(error) => this.fail(&error, cx),
                 }
@@ -1472,7 +1532,30 @@ impl Ide {
             .into_any_element()
     }
 
+    /// Says plainly where unsaved work lives and whether the browser may clear it.
+    fn storage_note(&self) -> String {
+        let place = match self.kept {
+            Some(Kept::Files) => {
+                "Unsaved changes are kept in this browser's file storage on this device."
+            }
+            Some(Kept::Small) => {
+                "This browser has no file storage, so unsaved changes are kept in a small store that holds about 5 MB."
+            }
+            None => "Unsaved changes are kept in this browser's storage on this device.",
+        };
+        let eviction = if self.persistent == Some(true) {
+            "The browser has agreed not to clear it."
+        } else {
+            "The browser may clear it if the device runs low on space or the site goes unused, so the checkpoint on GitHub is the durable copy."
+        };
+        format!("{place} {eviction}")
+    }
+
     fn more_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let nothing = self
+            .work
+            .as_ref()
+            .is_none_or(|work| work.workspace.changes().is_empty());
         let demo = self.session.as_ref().is_some_and(|session| session.demo);
         let login = match &self.session {
             Some(session) => session.login.clone(),
@@ -1514,6 +1597,12 @@ impl Ide {
                     },
                 ),
                 |this, _, cx| this.toggle_mono(cx),
+            ))
+            .child(Self::say("storage", Role::Text, self.storage_note()))
+            .child(Self::tap(
+                cx,
+                Tap::new("export", "Export changes as a patch file").disabled(nothing),
+                Self::export_patch,
             ))
             .child(Self::tap(
                 cx,

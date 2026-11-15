@@ -790,20 +790,30 @@ impl Workspace {
         };
         let old = match draft.base_sha() {
             Some(sha) => match std::str::from_utf8(&self.blob(sha).await?) {
-                Ok(text) => text.to_owned(),
+                Ok(text) => Some(text.to_owned()),
                 Err(_) => return Ok(format!("Binary file {file} changed\n")),
             },
-            None => String::new(),
+            None => None,
         };
         let new = match &draft {
-            Draft::Write { content, .. } => content.clone(),
-            Draft::Delete { .. } => String::new(),
+            Draft::Write { content, .. } => Some(content.clone()),
+            Draft::Delete { .. } => None,
             Draft::Link { sha, .. } => match std::str::from_utf8(&self.blob(sha).await?) {
-                Ok(text) => text.to_owned(),
+                Ok(text) => Some(text.to_owned()),
                 Err(_) => return Ok(format!("Binary file {file} changed\n")),
             },
         };
-        Ok(diff::unified(file, &old, &new))
+        Ok(diff::between(file, old.as_deref(), new.as_deref()))
+    }
+
+    /// Every local change as one patch file that `git apply` accepts: a way
+    /// to carry unsaved work out of the browser.
+    pub async fn patch(&self) -> Result<String> {
+        let mut patch = String::new();
+        for change in self.changes() {
+            patch.push_str(&self.diff(&change.path).await?);
+        }
+        Ok(patch)
     }
 
     /// Drops the local change to one file. Returns whether there was one.

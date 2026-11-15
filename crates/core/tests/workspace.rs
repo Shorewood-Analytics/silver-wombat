@@ -434,3 +434,52 @@ fn api_errors_map_to_actionable_kinds() {
     fake.set_offline(true);
     assert!(matches!(block_on(ws.refresh()), Err(Error::Network(_))));
 }
+
+/// The exported patch is only useful if real git accepts it.
+#[test]
+fn the_exported_patch_applies_with_git() {
+    use std::process::Command;
+    let (_, ws) = setup();
+    block_on(ws.write("src/main.py", "print('hi')\nprint('more')\n")).unwrap();
+    block_on(ws.write("docs/new file.md", "# New\n\nwith ünïcode\n")).unwrap();
+    block_on(ws.write("empty.txt", "")).unwrap();
+    block_on(ws.remove("README.md", false)).unwrap();
+    let patch = block_on(ws.patch()).unwrap();
+
+    let dir = std::env::temp_dir().join(format!("silver-wombat-patch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/util")).unwrap();
+    std::fs::write(dir.join("README.md"), "# r\n").unwrap();
+    std::fs::write(dir.join("src/main.py"), "print('hi')\n").unwrap();
+    std::fs::write(
+        dir.join("src/util/math.py"),
+        "def add(a, b):\n    return a + b\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("changes.patch"), &patch).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}\n{patch}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["apply", "changes.patch"]);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/main.py")).unwrap(),
+        "print('hi')\nprint('more')\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("docs/new file.md")).unwrap(),
+        "# New\n\nwith ünïcode\n"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("empty.txt")).unwrap(), "");
+    assert!(!dir.join("README.md").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
