@@ -94,7 +94,7 @@ fn writing_the_original_text_back_removes_the_change() {
     block_on(ws.write("src/main.py", "changed\n")).unwrap();
     assert_eq!(ws.changes().len(), 1);
     assert!(!block_on(ws.write("src/main.py", "print('hi')\n")).unwrap());
-    assert!(ws.changes().is_empty());
+    assert_eq!(ws.changes(), Vec::new());
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn commit_writes_one_commit_and_clears_changes() {
     assert_eq!(fake.file(REPO, "main", "README.md"), None);
     // Untouched files survive.
     assert!(fake.file(REPO, "main", "src/util/math.py").is_some());
-    assert!(ws.changes().is_empty());
+    assert_eq!(ws.changes(), Vec::new());
     assert_eq!(ws.head(), outcome.sha);
     assert_eq!(names(&ws, ""), ["docs", "src"]);
 }
@@ -298,7 +298,7 @@ fn deleting_a_file_someone_else_changed_conflicts() {
 fn refresh_reports_conflicts_and_keeps_local_work() {
     let (fake, ws) = setup();
     block_on(ws.write("src/main.py", "mine\n")).unwrap();
-    assert!(block_on(ws.refresh()).unwrap().is_empty());
+    assert_eq!(block_on(ws.refresh()).unwrap(), Vec::<String>::new());
     fake.push(
         REPO,
         "main",
@@ -364,7 +364,7 @@ fn remove_copy_and_rename() {
     // Removing a new, never-committed file just forgets it.
     block_on(ws.write("tmp.txt", "x")).unwrap();
     block_on(ws.remove("tmp.txt", false)).unwrap();
-    assert!(ws.changes().is_empty());
+    assert_eq!(ws.changes(), Vec::new());
     assert!(matches!(
         block_on(ws.remove("tmp.txt", false)),
         Err(Error::NotFound(_))
