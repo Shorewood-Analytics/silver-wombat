@@ -165,6 +165,7 @@ fn dist(args: &[String]) -> Result<(), String> {
     }
     python_runtimes(&root, &out)?;
     ml_runtime(&root, &out)?;
+    service_worker(&out)?;
 
     println!("dist/ is ready ({profile} profile):");
     let mut names: Vec<_> = fs::read_dir(&out)
@@ -184,6 +185,84 @@ fn dist(args: &[String]) -> Result<(), String> {
         "Serve it with any static file server, for example: python3 -m http.server -d dist 8080"
     );
     Ok(())
+}
+
+/// Every file under `folder`, as paths relative to `base` with `/` between
+/// the parts.
+fn files_under(base: &Path, folder: &Path, found: &mut Vec<String>) -> Result<(), String> {
+    let entries = fs::read_dir(folder)
+        .map_err(|error| format!("could not read {}: {error}", folder.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("could not read {}: {error}", folder.display()))?
+            .path();
+        if path.is_dir() {
+            files_under(base, &path, found)?;
+        } else if let Ok(relative) = path.strip_prefix(base) {
+            let parts: Vec<_> = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect();
+            found.push(parts.join("/"));
+        }
+    }
+    Ok(())
+}
+
+/// FNV-1a, 64 bits: enough to tell one build's files from another's.
+fn mix(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+/// Puts the version and the start-up files into the service worker's source.
+fn fill_service_worker(template: &str, version: u64, shell: &[String]) -> Result<String, String> {
+    const VERSION: &str = "\"__VERSION__\"";
+    const SHELL: &str = "__SHELL__";
+    if template.matches(VERSION).count() != 1 || template.matches(SHELL).count() != 1 {
+        return Err(format!(
+            "web/sw.js must contain {VERSION} and {SHELL} once each"
+        ));
+    }
+    let shell = serde_json::to_string(shell).map_err(|error| error.to_string())?;
+    Ok(template
+        .replace(VERSION, &format!("\"{version:016x}\""))
+        .replace(SHELL, &shell))
+}
+
+/// Finishes `dist/sw.js`, the script that keeps the app on the device so it
+/// opens with no connection. Its version is worked out from every file of the
+/// site, so any change makes a new version. The files it fetches up front are
+/// the ones the app starts from: everything at the top of `dist/`. The Python
+/// interpreters and the suggestion model's runtime are kept when first used.
+fn service_worker(out: &Path) -> Result<(), String> {
+    let script = out.join("sw.js");
+    let template = fs::read_to_string(&script)
+        .map_err(|error| format!("could not read {}: {error}", script.display()))?;
+    let mut files = Vec::new();
+    files_under(out, out, &mut files)?;
+    files.sort();
+    let mut version = 0xcbf2_9ce4_8422_2325;
+    mix(&mut version, template.as_bytes());
+    // The page itself is fetched by its folder's address.
+    let mut shell = vec!["./".to_owned()];
+    for file in &files {
+        if file == "sw.js" {
+            continue;
+        }
+        let bytes =
+            fs::read(out.join(file)).map_err(|error| format!("could not read {file}: {error}"))?;
+        mix(&mut version, file.as_bytes());
+        mix(&mut version, &[0]);
+        mix(&mut version, &bytes);
+        if !file.contains('/') && file != "index.html" {
+            shell.push(file.clone());
+        }
+    }
+    fs::write(&script, fill_service_worker(&template, version, &shell)?)
+        .map_err(|error| format!("could not write {}: {error}", script.display()))
 }
 
 /// The files of a Pyodide release that a browser needs. Each release has one
@@ -461,6 +540,24 @@ mod tests {
             let ring = contrast(&colour("colors", "ring"), &background);
             assert!(ring >= 3.0, "{name}: focus ring is {ring:.2}:1");
         }
+    }
+
+    #[test]
+    fn fills_in_the_service_worker() {
+        let template = "const VERSION = \"__VERSION__\";\nconst SHELL = __SHELL__;\n";
+        let shell = ["./".to_owned(), "app.css".to_owned()];
+        assert_eq!(
+            fill_service_worker(template, 0xab, &shell).unwrap(),
+            "const VERSION = \"00000000000000ab\";\nconst SHELL = [\"./\",\"app.css\"];\n"
+        );
+        assert!(fill_service_worker("const SHELL = __SHELL__;", 1, &shell).is_err());
+        // The same bytes always give the same version; a change gives another.
+        let (mut one, mut two, mut three) = (7, 7, 7);
+        mix(&mut one, b"abc");
+        mix(&mut two, b"abc");
+        mix(&mut three, b"abd");
+        assert_eq!(one, two);
+        assert_ne!(one, three);
     }
 
     #[test]

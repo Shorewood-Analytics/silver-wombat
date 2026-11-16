@@ -53,3 +53,7 @@ try {
 } catch (error) {
   fail(error);
 }
+
+// Keep a copy of the app on the device, so that it opens with no connection
+// (see sw.js). The app works without this; a browser that refuses is not an error.
+navigator.serviceWorker?.register("sw.js").catch((error) => console.warn("The app could not be kept on this device:", error));

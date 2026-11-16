@@ -156,6 +156,17 @@ For a faster, larger build while developing, use `cargo xtask dist --profile qui
 Pages has to be switched on once: **Settings > Pages > Build and deployment > Source: GitHub Actions**.
 The address is then <https://shorewood-analytics.github.io/silver-wombat/>. Until Pages is switched on the workflow does nothing.
 
+**Add it to the Home Screen.** In Safari: Share, then Add to Home Screen. Three reasons:
+
+- It opens full screen, without Safari's bars, which a phone needs.
+- Safari deletes what a site has stored (here: the token, unsaved changes, a downloaded model) after seven days of Safari use in which the site is not visited. A Home Screen app is counted separately, by its own use ([WebKit's description](https://webkit.org/blog/10218/full-third-party-cookie-blocking-and-more/)). Changes checkpointed to GitHub are safe either way.
+- It gets the app's icon and name.
+
+**Without a connection.** After the first visit the app is kept on the device (by `sw.js`, a service worker) and opens with no connection. Editing, the terminal and any Python version used before all work; saves stay on the device and are checkpointed when GitHub can be reached again. GitHub itself, a Python library not used before and the suggestion model's download need a connection. More says whether the app is kept on the device.
+A new version is fetched in the background and used the next time the app is opened after every window of it has been closed, so a running app is never given files from a newer build.
+
+Tested in Chrome and in WebKit with the site made unreachable: the app opens, restores unsaved work and runs Python. Adding to a Home Screen has not been tried on a device.
+
 ## Host on ChatGPT Sites
 
 `dist` is one of the output folders Sites accepts for a static-only site.

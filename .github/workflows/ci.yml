@@ -81,7 +81,7 @@ jobs:
       - run: cargo xtask dist
       - name: The site has every file it needs
         run: |
-          for file in index.html boot.js app.css silver_wombat_app.js silver_wombat_app_bg.wasm python-worker.js complete-worker.js ml/transformers.min.js ml/ort-wasm-simd-threaded.asyncify.mjs ml/ort-wasm-simd-threaded.asyncify.wasm; do
+          for file in index.html boot.js app.css sw.js manifest.webmanifest icon-180.png icon-192.png icon-512.png silver_wombat_app.js silver_wombat_app_bg.wasm python-worker.js complete-worker.js ml/transformers.min.js ml/ort-wasm-simd-threaded.asyncify.mjs ml/ort-wasm-simd-threaded.asyncify.wasm; do
             test -s "dist/$file" || { echo "::error::dist/$file is missing or empty"; exit 1; }
           done
           for version in 3.12 3.13 3.14 3.15; do
@@ -89,6 +89,7 @@ jobs:
               test -s "dist/python/$version/$file" || { echo "::error::dist/python/$version/$file is missing or empty"; exit 1; }
             done
           done
+          if grep -q '__VERSION__\|__SHELL__' dist/sw.js; then echo "::error::dist/sw.js was not filled in"; exit 1; fi
           ls -l dist dist/python/*
           du -sh dist
       # Starts the built site in Chrome and operates it through its

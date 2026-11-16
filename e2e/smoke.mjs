@@ -28,7 +28,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const inWebKit = process.env.BROWSER === "webkit";
 const dist = join(here, "..", "dist");
 const axeSource = await readFile(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
-const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".wasm": "application/wasm", ".json": "application/json" };
+const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".wasm": "application/wasm", ".json": "application/json", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png" };
 
 // Python's libraries are downloaded from Pyodide's CDN when a program first
 // imports one. Where the CDN can be reached (CI), that is tested for real.
@@ -46,7 +46,10 @@ const reachesGitHub = await fetch("https://api.github.com/zen", { signal: AbortS
 // fixtures/make_tiny_model.py), served here the way Hugging Face serves a
 // real one: <host>/<repository>/resolve/<revision>/<file>.
 const fixtures = join(here, "fixtures");
+// Set to make the site unreachable, as with no connection: every request is cut off.
+let siteDown = false;
 const server = createServer(async (request, response) => {
+  if (siteDown) return request.socket.destroy();
   const path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname));
   const fixture = path.match(/^\/fixtures\/([^/]+)\/resolve\/[^/]+\/(.+)$/);
   const root = fixture ? fixtures : dist;
@@ -124,7 +127,8 @@ async function launch(args, settings = {}) {
     // A library download that fails is reported in the terminal and tested
     // there. So is GitHub's refusal of the made-up token.
     const from = message.location().url;
-    if (message.type() === "error" && !from.startsWith(CDN) && !from.startsWith("https://api.github.com/")) errors.push(message.text().slice(0, 300));
+    // And while the test has cut the site off, requests are meant to fail.
+    if (message.type() === "error" && !siteDown && !from.startsWith(CDN) && !from.startsWith("https://api.github.com/")) errors.push(message.text().slice(0, 300));
   });
   page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 300)}`));
 }
@@ -674,6 +678,37 @@ try {
   await press("Terminal");
   await runLine("tail -n 1 letters.txt");
   check(await says("last words", 15_000), "including the last change made before leaving");
+
+  // --- With no connection: the app opens from the copy kept on the device ---
+  const icons = await page.evaluate(async () => {
+    const manifest = await (await fetch(document.querySelector('link[rel="manifest"]').href)).json();
+    const sources = [...manifest.icons.map((icon) => icon.src), document.querySelector('link[rel="apple-touch-icon"]').getAttribute("href")];
+    const found = await Promise.all(sources.map(async (source) => (await fetch(source)).ok));
+    return manifest.display === "standalone" && found.length >= 3 && found.every(Boolean);
+  });
+  check(icons, "the page can be added to a home screen: it names itself, opens without browser bars, and its icons exist");
+  const controlled = await eventually(() => page.evaluate(() => navigator.serviceWorker?.controller != null), 20_000);
+  check(controlled, "the app's files are kept on the device (a service worker serves this page)");
+  if (controlled) {
+    await press("More");
+    check(await hears("paragraph", (text) => text.includes("The app itself is kept on this device")), "the settings say that the app opens with no connection");
+    siteDown = true;
+    const unreachable = await page.evaluate(() => fetch(`not-kept-${Date.now()}.txt`).then(() => false, () => true));
+    let opened = false;
+    try {
+      await openDemo();
+      await press("Try the demo (no account)");
+      opened = await hears("heading", (text) => text.includes("demo/hello-python"));
+    } catch {
+      opened = false;
+    }
+    check(unreachable && opened, `with the site unreachable, the app still opens and the work kept on the device comes back${unreachable ? "" : " (the site could still be reached, so this showed nothing)"}`);
+    await press("Terminal");
+    await runLine("clear");
+    await runLine("python -c 'print(6 * 1111)'");
+    check(await says("6666", 60_000), "and Python, used before, runs with the site unreachable");
+    siteDown = false;
+  }
 
   // --- A model load that never finished is not walked into again ---
   // What is left behind when the page closes, or the browser ends it for

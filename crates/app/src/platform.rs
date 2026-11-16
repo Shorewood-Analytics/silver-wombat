@@ -295,6 +295,17 @@ pub fn save(key: &str, value: &str) -> Result<(), String> {
         .map_err(|error| describe(&error))
 }
 
+/// Whether the app's own files are being served from the copy kept on this
+/// device (by `web/sw.js`), which is what lets it open with no connection.
+pub fn kept_on_device() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    js_sys::Reflect::get(&window.navigator(), &JsValue::from_str("serviceWorker"))
+        .and_then(|workers| js_sys::Reflect::get(&workers, &JsValue::from_str("controller")))
+        .is_ok_and(|controller| controller.is_object())
+}
+
 /// Removes a setting saved on this device.
 pub fn forget(key: &str) {
     if let Ok(storage) = storage() {

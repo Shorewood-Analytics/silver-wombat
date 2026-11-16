@@ -3083,6 +3083,15 @@ impl Ide {
             .children(self.suggest_settings(cx))
             .children(Self::renderer_settings(cx))
             .child(Self::say("storage", Role::Text, self.storage_note()))
+            .child(Self::say(
+                "offline",
+                Role::Text,
+                if platform::kept_on_device() {
+                    "The app itself is kept on this device, so it opens with no connection. GitHub, new Python libraries and the suggestion model still need one."
+                } else {
+                    "The app itself is not kept on this device yet, so opening it needs a connection."
+                },
+            ))
             .child(Self::tap(
                 cx,
                 Tap::new("export", "Export changes as a patch file").disabled(nothing),
