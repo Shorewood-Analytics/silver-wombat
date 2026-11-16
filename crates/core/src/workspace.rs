@@ -783,19 +783,37 @@ impl Workspace {
             .map(|entry| state.save_state(entry.revision))
     }
 
-    /// A unified diff of one changed file against the base.
+    /// A unified diff of one changed file against the base: what the change
+    /// was started from.
     pub async fn diff(&self, file: &str) -> Result<String> {
         let Some(draft) = self.draft(file) else {
             return Ok(String::new());
         };
-        let old = match draft.base_sha() {
-            Some(sha) => match std::str::from_utf8(&self.blob(sha).await?) {
+        let base = draft.base_sha().map(str::to_owned);
+        self.diff_from(file, base, &draft).await
+    }
+
+    /// A unified diff of one changed file against what GitHub has for it now
+    /// (as of the last [`Self::refresh`]). For a file in conflict this is the
+    /// difference that matters: their version to the local one.
+    pub async fn diff_against_github(&self, file: &str) -> Result<String> {
+        let Some(draft) = self.draft(file) else {
+            return Ok(String::new());
+        };
+        let root = self.state.borrow().root_tree.clone();
+        let theirs = self.entry_in(&root, file).await?.map(|entry| entry.sha);
+        self.diff_from(file, theirs, &draft).await
+    }
+
+    async fn diff_from(&self, file: &str, old: Option<String>, draft: &Draft) -> Result<String> {
+        let old = match old {
+            Some(sha) => match std::str::from_utf8(&self.blob(&sha).await?) {
                 Ok(text) => Some(text.to_owned()),
                 Err(_) => return Ok(format!("Binary file {file} changed\n")),
             },
             None => None,
         };
-        let new = match &draft {
+        let new = match draft {
             Draft::Write { content, .. } => Some(content.clone()),
             Draft::Delete { .. } => None,
             Draft::Link { sha, .. } => match std::str::from_utf8(&self.blob(sha).await?) {
@@ -917,6 +935,46 @@ impl Workspace {
         }
         let root = self.state.borrow().root_tree.clone();
         self.conflicts_in(&root).await
+    }
+
+    /// The local changes that conflict with the branch as last fetched: files
+    /// that have also changed on GitHub since the local change was started.
+    /// Does not contact GitHub for the branch; call [`Self::refresh`] first
+    /// to compare with its latest state.
+    pub async fn conflicts(&self) -> Result<Vec<String>> {
+        let root = self.state.borrow().root_tree.clone();
+        self.conflicts_in(&root).await
+    }
+
+    /// Settles a conflict in favour of the local change: when committed, it
+    /// will replace what GitHub now has for this file. The other way to
+    /// settle one is [`Self::discard`], which takes GitHub's version.
+    ///
+    /// Until one of the two is chosen the conflict stays, however the file is
+    /// edited: nothing of someone else's is replaced without that choice.
+    pub async fn keep_mine(&self, file: &str) -> Result<()> {
+        let draft = self
+            .draft(file)
+            .ok_or_else(|| Error::NotFound(path::display(file)))?;
+        let root = self.state.borrow().root_tree.clone();
+        let theirs = self.entry_in(&root, file).await?.map(|entry| entry.sha);
+        let rebased = match (draft, theirs) {
+            (Draft::Write { content, mode, .. }, base_sha) => Some(Draft::Write {
+                content,
+                base_sha,
+                mode,
+            }),
+            (Draft::Link { sha, mode, .. }, base_sha) => Some(Draft::Link {
+                sha,
+                base_sha,
+                mode,
+            }),
+            (Draft::Delete { .. }, Some(base_sha)) => Some(Draft::Delete { base_sha }),
+            // It is already gone on GitHub: the deletion has nothing left to do.
+            (Draft::Delete { .. }, None) => None,
+        };
+        self.set_draft(file, rebased);
+        Ok(())
     }
 
     async fn tree_changes(

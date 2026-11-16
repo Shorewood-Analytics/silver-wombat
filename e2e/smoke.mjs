@@ -449,6 +449,24 @@ try {
   await press("Remove the downloaded model for code suggestions");
   check(await status("was removed from this device"), "and the downloaded model can be removed");
 
+  // --- A conflict: a file changed here was also changed on GitHub ---
+  await press("More");
+  await press("Demo: someone else changes a file on GitHub");
+  await press("Terminal");
+  await runLine("echo '# my note' >> app/greet.py");
+  await press("Changes");
+  await typeInto("Commit message", "My note");
+  await press("Commit to main");
+  check(await status("nothing on GitHub was changed") && await status("also changed on GitHub since you started"), "a commit is refused when a changed file also changed on GitHub, and says nothing was written");
+  check((await button("Keep my version of /app/greet.py").count()) === 1 && (await button("Use GitHub's version of /app/greet.py").count()) === 1, "that file offers two choices: keep mine, or use GitHub's");
+  await press("Compare /app/greet.py with GitHub's version");
+  check(await eventually(async () => { const text = await layer.locator('[data-key="diff-text"]').textContent(); return text.includes("Hello there") && text.includes("+# my note"); }), "and a comparison of my version with GitHub's new one");
+  await press("Keep my version of /app/greet.py");
+  check(await status("Keeping your version of /app/greet.py"), "choosing mine is confirmed");
+  await typeInto("Commit message", "My note");
+  await press("Commit to main");
+  check(await hears("status", (text) => text.startsWith("Committed")), "after choosing, the commit goes through");
+
   // --- Files from this device ---
   await press("Files");
   const importButton = await button("Add files from this device").evaluate((e) => e.getBoundingClientRect().toJSON());
@@ -509,15 +527,17 @@ try {
   errors.length = 0;
   await launch(softwareWebGpu, { "silver-wombat.suggest": "on" });
   await openDemo();
-  // Chrome's software WebGPU loses its device as soon as the app starts
-  // drawing. That makes this a test of the recovery: the page notes that
+  // Two things can happen here, and both are right. Where software WebGPU
+  // works (GitHub's runners), the app draws with it. Where its device is lost
+  // as soon as drawing starts (seen with Chrome 153), the page notes that
   // WebGPU drawing failed, reloads once, and draws with WebGL2.
-  check(await eventually(async () => (await page.evaluate(() => localStorage.getItem("silver-wombat.renderer"))) === "webgl", 20_000), "when the WebGPU device is lost, the page switches to WebGL2 and reloads");
+  const fellBack = await eventually(async () => (await page.evaluate(() => localStorage.getItem("silver-wombat.renderer"))) === "webgl", 8_000);
+  console.log(`     (WebGPU drawing ${fellBack ? "lost its device here, so this tests the fall-back to WebGL2" : "works here, so this tests drawing with WebGPU"})`);
   await button("Try the demo (no account)").waitFor({ state: "attached", timeout: 60_000 });
   await settle(1500);
-  errors.length = 0;
+  if (fellBack) errors.length = 0;
   check(await page.evaluate(async () => (await navigator.gpu?.requestAdapter()) != null), "this browser session has WebGPU (a software one)");
-  check((await page.screenshot()).length > 12_000, "after that the app is drawn (the screenshot is not a blank page)");
+  check((await page.screenshot()).length > 12_000, `the app is drawn, ${fellBack ? "with WebGL2 after the reload" : "with WebGPU"} (the screenshot is not a blank page)`);
   await press("Try the demo (no account)");
   await press("Terminal");
   const typeLine = async (line) => {
@@ -529,9 +549,9 @@ try {
   check(await eventually(async () => (await heard("status")).some((text) => text.includes("Suggestion: nopqrst")), 60_000), "a suggestion arrives (after klm: nopqrst...)");
   await press("More");
   check(await eventually(async () => (await heard("status")).some((text) => text.includes("is running on the GPU (WebGPU)"))), "the model itself runs on WebGPU, in its worker, and the settings say so");
-  check((await button("Try WebGPU drawing again (reloads the page)").count()) === 1, "the settings say drawing fell back to WebGL2 and offer to try WebGPU again");
+  check((await button("Try WebGPU drawing again (reloads the page)").count()) === (fellBack ? 1 : 0), fellBack ? "the settings say drawing fell back to WebGL2 and offer to try WebGPU again" : "the settings do not mention a fall-back, because there was none");
   await scan("more, on WebGPU");
-  check(errors.length === 0, `no errors in the browser console after the reload${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
+  check(errors.length === 0, `no errors in the browser console in this session${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
 } catch (error) {
   failures += 1;
   console.log(`FAIL the test stopped: ${error.message.split("\n")[0]}`);

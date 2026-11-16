@@ -252,6 +252,66 @@ fn a_conflicting_remote_change_blocks_the_commit_and_writes_nothing() {
 }
 
 #[test]
+fn a_conflict_is_settled_by_choosing_a_side() {
+    let (fake, ws) = setup();
+    block_on(ws.write("src/main.py", "mine\n")).unwrap();
+    block_on(ws.write("README.md", "# mine\n")).unwrap();
+    block_on(ws.remove("src/util/math.py", false)).unwrap();
+    let theirs = fake.push(
+        REPO,
+        "main",
+        "Their change",
+        &[
+            ("src/main.py", Some("theirs\n")),
+            ("README.md", Some("# theirs\n")),
+            ("src/util/math.py", None),
+        ],
+    );
+    assert!(matches!(
+        block_on(ws.commit("Mine")),
+        Err(Error::Conflict(_))
+    ));
+
+    // Fetching the branch shows what conflicts, and the diff of each file is
+    // now from GitHub's version to the local one.
+    let conflicts = block_on(ws.refresh()).unwrap();
+    assert_eq!(conflicts, ["README.md", "src/main.py", "src/util/math.py"]);
+    let diff = block_on(ws.diff_against_github("src/main.py")).unwrap();
+    assert!(diff.contains("-theirs") && diff.contains("+mine"), "{diff}");
+    // The ordinary diff still shows the change from where it started.
+    assert!(
+        block_on(ws.diff("src/main.py"))
+            .unwrap()
+            .contains("-print('hi')")
+    );
+
+    // Editing the file again does not settle it.
+    block_on(ws.write("src/main.py", "mine, edited\n")).unwrap();
+    assert_eq!(block_on(ws.conflicts()).unwrap().len(), 3);
+
+    // Mine for one, theirs for another; the deletion both sides made is moot.
+    block_on(ws.keep_mine("src/main.py")).unwrap();
+    assert!(ws.discard("README.md"));
+    block_on(ws.keep_mine("src/util/math.py")).unwrap();
+    assert_eq!(block_on(ws.conflicts()).unwrap(), Vec::<String>::new());
+    assert_eq!(block_on(ws.read_text("README.md")).unwrap(), "# theirs\n");
+
+    let outcome = block_on(ws.commit("Mine, on top of theirs")).unwrap();
+    let (_, parents) = fake.commit_info(REPO, &outcome.sha).unwrap();
+    assert_eq!(parents, [theirs]);
+    assert_eq!(
+        fake.file(REPO, "main", "src/main.py").unwrap(),
+        "mine, edited\n"
+    );
+    assert_eq!(fake.file(REPO, "main", "README.md").unwrap(), "# theirs\n");
+    assert_eq!(fake.file(REPO, "main", "src/util/math.py"), None);
+    assert!(matches!(
+        block_on(ws.keep_mine("no/such/change")),
+        Err(Error::NotFound(_))
+    ));
+}
+
+#[test]
 fn an_unrelated_remote_change_does_not_block() {
     let (fake, ws) = setup();
     block_on(ws.write("src/main.py", "mine\n")).unwrap();

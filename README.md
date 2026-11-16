@@ -13,7 +13,7 @@ There is no server: the page talks straight to the GitHub API with your token.
   A state is only shown after the write that earns it has succeeded.
 - Continuous save: a pause in typing saves to the device, and a few seconds later checkpoints to the `autosave/<branch>` branch on GitHub. Your real branch is not touched until you commit.
   When the page is hidden or closed (switching app, locking the phone), anything not yet saved is written to the device at once. If the device cannot store it, the state reads "Not saved on this device" until it can.
-- Commit all changes as one commit. Before writing, the app fetches the branch and refuses if any changed file differs on GitHub from what you started with. Nothing is overwritten.
+- Commit all changes as one commit. Before writing, the app fetches the branch and refuses if any changed file differs on GitHub from what you started with. Nothing is overwritten. Each such file then offers a comparison with GitHub's version and a choice: keep mine, or use GitHub's. (The demo has a button in More that changes a file "as someone else", to try this.)
 - A terminal that runs in the browser on the open repository: `ls`, `cd`, `cat`, `head`, `tail`, `wc`, `grep`, `find`, `echo`, `touch`, `rm`, `mv`, `cp`, `open`, `save`, and `git status | diff | commit -m | log | branch | switch | restore | pull`, with pipes, `&&`, `;`, `>` and `>>`.
 - Python 3.12, 3.13, 3.14 and 3.15 in that terminal, running in the browser tab. See [Python](#python).
 - **Go to**: type a few letters of a file's name, or of an action, and pick it. Control+K or Command+K with a keyboard attached.
@@ -185,7 +185,7 @@ npm ci --prefix e2e && node e2e/smoke.mjs
 node e2e/model.mjs    # the real suggestion model; downloads about 320 MB
 ```
 
-**Drawing.** GPUI draws with WebGPU where the browser has it and WebGL2 where it does not. Every test here has drawn with WebGL2. The one WebGPU available to the tests, Chrome's software version, loses its device as soon as the app starts drawing; whether that is the software version's fault or the app's is not known, and WebGPU drawing has not been seen working on real hardware either. So the app guards against it: if the WebGPU device is lost, it remembers to use WebGL2 on that device and reloads once (unsaved work is already on the device and comes back). More then says so and offers to try WebGPU again. The test covers that recovery.
+**Drawing.** GPUI draws with WebGPU where the browser has it and WebGL2 where it does not. Both have been seen working, in different places: with Chrome's software WebGPU on GitHub's runners the app draws with WebGPU; with the same switches on Chrome 153 the WebGPU device is lost as soon as drawing starts, which leaves a blank canvas. The app guards against that: if the WebGPU device is lost, it remembers to use WebGL2 on that device and reloads once (unsaved work is already on the device and comes back). More then says so and offers to try WebGPU again. The test covers whichever of the two happens where it runs. Neither has been seen on real GPU hardware.
 
 The owner (`benpshore`) may push their own work directly to `main` without a PR or passing CI. CI still runs after a push; releases retain their CI gates. Force-push, deletion, and merge commits remain blocked for everyone.
 

@@ -202,6 +202,9 @@ struct Session {
     github: GitHub,
     login: String,
     demo: bool,
+    /// The demo's stand-in for GitHub, kept so that the demo can show what
+    /// happens when someone else changes the repository.
+    demo_server: Option<Rc<FakeGitHub>>,
 }
 
 struct Work {
@@ -213,6 +216,9 @@ struct Work {
     terminal_text: String,
     history_at: Option<usize>,
     diff_of: Option<String>,
+    /// Changed files that have also changed on GitHub, found when a commit
+    /// was refused. Each has to be settled one way or the other.
+    conflicts: Vec<String>,
     /// Bumped on every local change; a delayed save only runs if it is still current.
     save_generation: u64,
     device_error: Option<String>,
@@ -607,6 +613,7 @@ impl Ide {
                         github,
                         login: user.login,
                         demo: false,
+                        demo_server: None,
                     });
                     this.repos = repos;
                     this.screen = Screen::Repos;
@@ -621,11 +628,12 @@ impl Ide {
     }
 
     fn start_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let github = GitHub::new(Rc::new(FakeGitHub::demo()));
+        let server = Rc::new(FakeGitHub::demo());
         self.session = Some(Session {
-            github,
+            github: GitHub::new(server.clone()),
             login: "demo".to_owned(),
             demo: true,
+            demo_server: Some(server),
         });
         self.notice = None;
         self.open_repo(
@@ -720,6 +728,7 @@ impl Ide {
                         terminal_text: String::new(),
                         history_at: None,
                         diff_of: None,
+                        conflicts: Vec::new(),
                         save_generation: 0,
                         device_error: None,
                     });
@@ -1098,11 +1107,23 @@ impl Ide {
 
     // ----- Changes -----
 
-    fn show_diff(&mut self, file: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Shows a file's diff: against where the change started or, for a file
+    /// in conflict, against what GitHub has now.
+    fn show_diff(
+        &mut self,
+        file: String,
+        against_github: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(work) = &self.work else { return };
         let workspace = work.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = workspace.diff(&file).await;
+            let result = if against_github {
+                workspace.diff_against_github(&file).await
+            } else {
+                workspace.diff(&file).await
+            };
             this.update_in(cx, |this, window, cx| match result {
                 Ok(text) => {
                     this.diff
@@ -1125,12 +1146,90 @@ impl Ide {
         if work.diff_of.as_deref() == Some(file.as_str()) {
             work.diff_of = None;
         }
+        work.conflicts.retain(|path| *path != file);
         self.notice = Some(format!("Discarded the change to {}.", path::display(&file)));
         self.changed(window, cx);
         self.refresh_files(window, cx);
         if self.work.as_ref().and_then(|work| work.open.as_deref()) == Some(file.as_str()) {
             self.reload_if_changed(file, window, cx);
         }
+    }
+
+    /// A commit was refused because files changed on GitHub too. Fetch the
+    /// branch, so that each file can be compared with their version, and
+    /// list the files to settle.
+    fn find_conflicts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let workspace = work.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let found = workspace.refresh().await;
+            this.update_in(cx, |this, window, cx| match found {
+                Ok(conflicts) => {
+                    this.notice = Some(format!(
+                        "Not committed, and nothing on GitHub was changed. {} of your changed files {} also changed on GitHub since you started. Choose a version for each below, then commit again.",
+                        conflicts.len(),
+                        if conflicts.len() == 1 { "has" } else { "have" }
+                    ));
+                    if let Some(work) = &mut this.work {
+                        work.conflicts = conflicts;
+                    }
+                    this.refresh_files(window, cx);
+                    cx.notify();
+                }
+                Err(error) => this.fail(&error, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Settles a conflict in favour of the local change.
+    fn keep_mine(&mut self, file: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let workspace = work.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let kept = workspace.keep_mine(&file).await;
+            this.update_in(cx, |this, window, cx| match kept {
+                Ok(()) => {
+                    if let Some(work) = &mut this.work {
+                        work.conflicts.retain(|path| *path != file);
+                    }
+                    this.notice = Some(format!(
+                        "Keeping your version of {}. It will replace GitHub's when you commit.",
+                        path::display(&file)
+                    ));
+                    this.changed(window, cx);
+                }
+                Err(error) => this.fail(&error, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Demo only: changes a file in the demo repository as if someone else
+    /// had pushed, so the person can see how a conflict is handled.
+    fn demo_teammate(&mut self, cx: &mut Context<Self>) {
+        let (Some(session), Some(work)) = (&self.session, &self.work) else {
+            return;
+        };
+        let Some(server) = &session.demo_server else {
+            return;
+        };
+        server.push(
+            work.workspace.repo(),
+            &work.workspace.branch(),
+            "Greet more warmly",
+            &[(
+                "app/greet.py",
+                Some("def greet(name: str) -> str:\n    return f\"Hello there, {name}!\"\n"),
+            )],
+        );
+        self.notice = Some(
+            "Demo: someone else just changed app/greet.py on GitHub. Edit that file too and commit to see what happens."
+                .to_owned(),
+        );
+        cx.notify();
     }
 
     fn checkpoint_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1188,10 +1287,12 @@ impl Ide {
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         if let Some(work) = &mut this.work {
                             work.diff_of = None;
+                            work.conflicts.clear();
                         }
                         this.changed(window, cx);
                         this.refresh_files(window, cx);
                     }
+                    Err(Error::Conflict(_)) => this.find_conflicts(window, cx),
                     Err(error) => this.fail(&error, cx),
                 }
                 cx.notify();
@@ -2524,7 +2625,12 @@ impl Ide {
             .into_any_element()
     }
 
-    fn change_row(index: usize, change: &Change, cx: &mut Context<Self>) -> AnyElement {
+    fn change_row(
+        index: usize,
+        change: &Change,
+        conflict: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let kind = match change.kind {
             ChangeKind::Added => "New",
             ChangeKind::Modified => "Edited",
@@ -2533,35 +2639,71 @@ impl Ide {
         let shown = path::display(&change.path);
         let for_diff = change.path.clone();
         let for_discard = change.path.clone();
-        v_flex()
+        let row = v_flex()
             .gap_1()
             .p_2()
             .border_1()
             .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
-            .child(Self::say(
-                &format!("change-{index}"),
-                Role::Text,
-                format!("{kind}: {shown}. {}.", change.state.label()),
-            ))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(Self::tap(
-                        cx,
-                        Tap::new(format!("diff-{index}"), format!("Show diff of {shown}")),
-                        move |this, window, cx| this.show_diff(for_diff.clone(), window, cx),
-                    ))
-                    .child(Self::tap(
-                        cx,
-                        Tap::new(
-                            format!("discard-{index}"),
-                            format!("Discard change to {shown}"),
-                        ),
-                        move |this, window, cx| this.discard(for_discard.clone(), window, cx),
-                    )),
-            )
-            .into_any_element()
+            .rounded(cx.theme().radius);
+        if !conflict {
+            return row
+                .child(Self::say(
+                    &format!("change-{index}"),
+                    Role::Text,
+                    format!("{kind}: {shown}. {}.", change.state.label()),
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Self::tap(
+                            cx,
+                            Tap::new(format!("diff-{index}"), format!("Show diff of {shown}")),
+                            move |this, window, cx| {
+                                this.show_diff(for_diff.clone(), false, window, cx);
+                            },
+                        ))
+                        .child(Self::tap(
+                            cx,
+                            Tap::new(
+                                format!("discard-{index}"),
+                                format!("Discard change to {shown}"),
+                            ),
+                            move |this, window, cx| this.discard(for_discard.clone(), window, cx),
+                        )),
+                )
+                .into_any_element();
+        }
+        // In conflict: this file changed on GitHub too. Nothing of theirs is
+        // replaced, and nothing of the person's is dropped, until they choose.
+        let for_mine = change.path.clone();
+        row.child(Self::say(
+            &format!("change-{index}"),
+            Role::Text,
+            format!("{kind}: {shown}. Also changed on GitHub. Choose which version to keep."),
+        ))
+        .child(Self::tap(
+            cx,
+            Tap::new(format!("diff-{index}"), "Compare with GitHub's")
+                .named(format!("Compare {shown} with GitHub's version")),
+            move |this, window, cx| this.show_diff(for_diff.clone(), true, window, cx),
+        ))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(Self::tap(
+                    cx,
+                    Tap::new(format!("mine-{index}"), "Keep mine")
+                        .named(format!("Keep my version of {shown}")),
+                    move |this, window, cx| this.keep_mine(for_mine.clone(), window, cx),
+                ))
+                .child(Self::tap(
+                    cx,
+                    Tap::new(format!("discard-{index}"), "Use GitHub's")
+                        .named(format!("Use GitHub's version of {shown}")),
+                    move |this, window, cx| this.discard(for_discard.clone(), window, cx),
+                )),
+        )
+        .into_any_element()
     }
 
     fn diff_view(&self, file: &str, cx: &mut Context<Self>) -> Div {
@@ -2603,10 +2745,13 @@ impl Ide {
         let diff_of = work.diff_of.clone();
         let device_error = work.device_error.clone();
         let busy = self.busy;
+        let conflicts = work.conflicts.clone();
         let rows: Vec<AnyElement> = changes
             .iter()
             .enumerate()
-            .map(|(index, change)| Self::change_row(index, change, cx))
+            .map(|(index, change)| {
+                Self::change_row(index, change, conflicts.contains(&change.path), cx)
+            })
             .collect();
         let nothing = changes.is_empty();
         v_flex()
@@ -2720,6 +2865,14 @@ impl Ide {
                     format!("Signed in as {login}.")
                 },
             ))
+            .when(demo, |pane| {
+                pane.child(Self::tap(
+                    cx,
+                    Tap::new("demo-teammate", "Demo: someone else changes a file")
+                        .named("Demo: someone else changes a file on GitHub"),
+                    |this, _, cx| this.demo_teammate(cx),
+                ))
+            })
             .child(Self::tap(
                 cx,
                 Tap::new(
