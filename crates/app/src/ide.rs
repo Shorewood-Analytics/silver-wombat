@@ -56,6 +56,8 @@ const DEVICE_SAVE_DELAY: Duration = Duration::from_millis(400);
 const CHECKPOINT_DELAY: Duration = Duration::from_secs(5);
 /// Terminal text kept on screen. Older output is dropped from the top.
 const TERMINAL_KEEP_BYTES: usize = 200 * 1024;
+/// The largest picture in the repository that is fetched to be shown.
+const MAX_PICTURE_BYTES: u64 = 8 * 1024 * 1024;
 /// Space between the extra keys, and at each end of their row.
 const KEY_GAP: f32 = 2.0;
 const KEY_EDGE: f32 = 4.0;
@@ -242,6 +244,8 @@ struct Work {
     /// The pictures the last Python program wrote, and the one being looked at.
     pictures: Vec<Shown>,
     viewing: Option<usize>,
+    /// A picture from the repository, open in place of the editor.
+    viewed: Option<Shown>,
     history_at: Option<usize>,
     diff_of: Option<String>,
     /// Changed files that have also changed on GitHub, found when a commit
@@ -755,6 +759,7 @@ impl Ide {
                         terminal_text: term::Display::new(),
                         pictures: Vec::new(),
                         viewing: None,
+                        viewed: None,
                         history_at: None,
                         diff_of: None,
                         conflicts: Vec::new(),
@@ -828,8 +833,16 @@ impl Ide {
         let workspace = work.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = workspace.read(&file).await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok(FileContent::Text(text)) => {
+            // A picture is not text, but it can be looked at.
+            let picture = match (&result, path::picture_type(&file)) {
+                (Ok(FileContent::Binary { size }), Some(kind)) if *size <= MAX_PICTURE_BYTES => {
+                    Some((kind, workspace.read_bytes(&file).await))
+                }
+                _ => None,
+            };
+            this.update_in(cx, |this, window, cx| match (result, picture) {
+                (_, Some((kind, bytes))) => this.view_file(&file, kind, bytes, reveal, cx),
+                (Ok(FileContent::Text(text)), _) => {
                     let language = language_for(&file);
                     // The editor's language is fixed when it is created, so each
                     // opened file gets a fresh editor.
@@ -857,6 +870,7 @@ impl Ide {
                     this.editor = editor;
                     if let Some(work) = &mut this.work {
                         work.open = Some(file);
+                        work.viewed = None;
                     }
                     if reveal {
                         this.pane = Pane::Editor;
@@ -864,18 +878,53 @@ impl Ide {
                     }
                     cx.notify();
                 }
-                Ok(FileContent::Binary { size }) => {
+                (Ok(FileContent::Binary { size }), _) => {
                     this.notice = Some(format!(
                         "{} is not text ({size} bytes), so it cannot be opened in the editor.",
                         path::display(&file)
                     ));
                     cx.notify();
                 }
-                Err(error) => this.fail(&error, cx),
+                (Err(error), _) => this.fail(&error, cx),
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Shows a picture from the repository where the editor would be.
+    fn view_file(
+        &mut self,
+        file: &str,
+        kind: &str,
+        bytes: Result<Rc<Vec<u8>>, Error>,
+        reveal: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let address = match bytes {
+            Ok(bytes) => platform::file_address(&bytes, kind),
+            Err(error) => return self.fail(&error, cx),
+        };
+        match (address, &mut self.work) {
+            (Ok(address), Some(work)) => {
+                work.viewed = Some(Shown {
+                    name: path::display(file),
+                    address,
+                });
+                if reveal {
+                    self.pane = Pane::Editor;
+                    self.notice = None;
+                }
+            }
+            (Err(reason), _) => {
+                self.notice = Some(format!(
+                    "{} could not be shown: {reason}",
+                    path::display(file)
+                ));
+            }
+            (Ok(address), None) => platform::forget_address(&address),
+        }
+        cx.notify();
     }
 
     fn editor_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1035,11 +1084,16 @@ impl Ide {
         }
     }
 
-    fn save_picture(&mut self, cx: &mut Context<Self>) {
+    /// Hands the picture being looked at to the device: the one a program
+    /// wrote (`from_run`) or the one opened from the repository.
+    fn save_picture(&mut self, from_run: bool, cx: &mut Context<Self>) {
         let Some(work) = &self.work else { return };
-        let Some(picture) = work.viewing.and_then(|index| work.pictures.get(index)) else {
-            return;
+        let picture = if from_run {
+            work.viewing.and_then(|index| work.pictures.get(index))
+        } else {
+            work.viewed.as_ref()
         };
+        let Some(picture) = picture else { return };
         // Only the file's own name: a download cannot choose a folder.
         let name = picture.name.rsplit('/').next().unwrap_or(&picture.name);
         if let Err(reason) = platform::download_address(name, &picture.address) {
@@ -1048,8 +1102,31 @@ impl Ide {
         }
     }
 
-    /// One picture, as large as the pane allows, in place of the output.
-    fn picture_view(name: &str, address: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn close_picture(&mut self, from_run: bool, cx: &mut Context<Self>) {
+        if let Some(work) = &mut self.work {
+            if from_run {
+                work.viewing = None;
+            } else {
+                work.viewed = None;
+            }
+            cx.notify();
+        }
+    }
+
+    /// One picture, as large as the pane allows: in place of the terminal's
+    /// output for one a program wrote (`from_run`), in place of the editor
+    /// for one opened from the repository.
+    fn picture_view(
+        name: &str,
+        address: &str,
+        from_run: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (key, what) = if from_run {
+            ("run-picture", "a picture the program wrote")
+        } else {
+            ("file-picture", "a picture in the repository")
+        };
         v_flex()
             .flex_1()
             .min_h_0()
@@ -1059,22 +1136,24 @@ impl Ide {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(Self::say("picture-name", Role::Section, name.to_owned()).flex_1())
+                    .child(
+                        Self::say(&format!("{key}-name"), Role::Section, name.to_owned()).flex_1(),
+                    )
                     .child(Self::tap(
                         cx,
-                        Tap::new("picture-save", "Save")
+                        Tap::new(format!("{key}-save"), "Save")
                             .named(format!("Save {name} to this device")),
-                        |this, _, cx| this.save_picture(cx),
+                        move |this, _, cx| this.save_picture(from_run, cx),
                     ))
                     .child(Self::tap(
                         cx,
-                        Tap::new("picture-close", "Close").named("Close the picture"),
-                        |this, _, cx| this.view_picture(None, cx),
+                        Tap::new(format!("{key}-close"), "Close").named(format!("Close {name}")),
+                        move |this, _, cx| this.close_picture(from_run, cx),
                     )),
             )
             .child(div().relative().flex_1().min_h_0().child(mirror::picture(
-                "picture",
-                format!("{name}, a picture the program wrote"),
+                key,
+                format!("{name}, {what}"),
                 address,
             )))
             .into_any_element()
@@ -2626,6 +2705,13 @@ impl Ide {
         let Some(work) = &self.work else {
             return div().into_any_element();
         };
+        if let Some(picture) = &work.viewed {
+            let (name, address) = (picture.name.clone(), picture.address.clone());
+            return v_flex()
+                .size_full()
+                .child(Self::picture_view(&name, &address, false, cx))
+                .into_any_element();
+        }
         let Some(file) = work.open.clone() else {
             return v_flex()
                 .size_full()
@@ -2696,7 +2782,7 @@ impl Ide {
             Some((picture.name.clone(), picture.address.clone()))
         });
         if let Some((name, address)) = viewing {
-            return Self::picture_view(&name, &address, cx);
+            return Self::picture_view(&name, &address, true, cx);
         }
         // What a screen reader hears: the most recent output, not the whole scrollback.
         let recent = match &self.work {

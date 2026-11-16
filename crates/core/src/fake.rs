@@ -311,7 +311,46 @@ impl FakeGitHub {
                 ("pyproject.toml", "[project]\nname = \"hello-python\"\nversion = \"0.1.0\"\nrequires-python = \">=3.12\"\n"),
             ],
         );
+        // One file that is not text, to try opening a picture on.
+        fake.add_file(
+            "demo/hello-python",
+            "main",
+            "docs/icon.png",
+            include_bytes!("demo-picture.png"),
+        );
         fake
+    }
+
+    /// Adds one file of any kind to a branch, as a commit of its own.
+    ///
+    /// # Panics
+    /// Panics if the repository or branch is missing or the path is empty,
+    /// which is a mistake in the calling code.
+    pub fn add_file(&self, full_name: &str, branch: &str, path: &str, bytes: &[u8]) {
+        let mut state = self.state.borrow_mut();
+        state.clock += 1;
+        let clock = state.clock;
+        let repo = state.repos.get_mut(full_name).expect("a known repository");
+        let head = repo.refs.get(branch).expect("a known branch").clone();
+        let base = repo
+            .commits
+            .get(&head)
+            .expect("a known commit")
+            .tree
+            .clone();
+        let sha = repo.put_blob(bytes);
+        let change = (
+            path.split('/').map(str::to_owned).collect(),
+            Leaf::Set {
+                mode: MODE_FILE.to_owned(),
+                sha,
+            },
+        );
+        let tree = repo
+            .apply_root(Some(&base), vec![change])
+            .expect("a valid path");
+        let commit = repo.put_commit(&tree, &[head], &format!("Add {path}"), clock);
+        repo.refs.insert(branch.to_owned(), commit);
     }
 
     /// Creates a repository with one commit containing `files`.

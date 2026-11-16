@@ -496,6 +496,32 @@ impl Workspace {
     }
 
     /// Reads a file that must be text.
+    /// A file's bytes, whatever they are. [`Self::read`] is the way to get
+    /// text; this is for showing a file that is not text, such as a picture.
+    pub async fn read_bytes(&self, file: &str) -> Result<Rc<Vec<u8>>> {
+        let sha = match self.draft(file) {
+            Some(Draft::Write { content, .. }) => return Ok(Rc::new(content.into_bytes())),
+            Some(Draft::Delete { .. }) => return Err(Error::NotFound(path::display(file))),
+            Some(Draft::Link { sha, .. }) => sha,
+            None => {
+                let entry = self
+                    .base_entry(file)
+                    .await?
+                    .ok_or_else(|| Error::NotFound(path::display(file)))?;
+                match kind_of(&entry) {
+                    EntryKind::File | EntryKind::Symlink => entry.sha,
+                    EntryKind::Dir | EntryKind::Submodule => {
+                        return Err(Error::Invalid(format!(
+                            "{} is not a file",
+                            path::display(file)
+                        )));
+                    }
+                }
+            }
+        };
+        self.blob(&sha).await
+    }
+
     pub async fn read_text(&self, file: &str) -> Result<String> {
         match self.read(file).await? {
             FileContent::Text(text) => Ok(text),

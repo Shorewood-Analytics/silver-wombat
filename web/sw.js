@@ -45,7 +45,14 @@ self.addEventListener("fetch", (event) => {
       // Whatever address the app was opened with, the page is the same page.
       const kept = request.mode === "navigate" ? await cache.match(new URL("./", self.registration.scope).href) : await cache.match(request);
       if (kept) return kept;
-      const reply = await fetch(request, request.mode === "navigate" ? undefined : FRESH);
+      let reply;
+      try {
+        reply = await fetch(request, request.mode === "navigate" ? undefined : FRESH);
+      } catch {
+        // No connection: the page is told the request failed, as it would be
+        // without this script.
+        return Response.error();
+      }
       if (reply.ok && reply.type === "basic") {
         // A full device must not stop the file being used.
         cache.put(request, reply.clone()).catch(() => {});

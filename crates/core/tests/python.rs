@@ -400,6 +400,53 @@ fn uv_run_installs_what_the_script_declares() {
 }
 
 #[test]
+fn files_that_are_not_text_are_held_back_and_mentioned_only_on_failure() {
+    let fake = Rc::new(FakeGitHub::new("tester"));
+    fake.add_repo(REPO, "main", &[("main.py", "print(1)\n")]);
+    fake.add_file(
+        REPO,
+        "main",
+        "data/photo.png",
+        &[0x89, b'P', b'N', b'G', 0xff, 0xfe],
+    );
+    let ws = block_on(Workspace::open(GitHub::new(fake), REPO, "main")).unwrap();
+    let python = Rc::new(FakePython::default());
+    let sh = Shell::new();
+    sh.add_tool(Rc::new(PythonTool::new(python.clone())));
+
+    python.answer(Outcome::default());
+    let (text, code) = run(&sh, &ws, "python main.py");
+    assert_eq!(code, 0);
+    assert!(!text.contains("not text"), "{text}");
+    let given: Vec<String> = python
+        .last()
+        .files
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(given, ["main.py"]);
+
+    python.answer(Outcome {
+        status: 1,
+        ..Outcome::default()
+    });
+    let (text, code) = run(&sh, &ws, "python main.py");
+    assert_eq!(code, 1);
+    assert!(
+        text.contains("1 file in the repository is not text and was not given to Python"),
+        "{text}"
+    );
+
+    // The same file can be read as it is, for showing.
+    assert_eq!(
+        *block_on(ws.read_bytes("data/photo.png")).unwrap(),
+        [0x89, b'P', b'N', b'G', 0xff, 0xfe]
+    );
+    assert_eq!(*block_on(ws.read_bytes("main.py")).unwrap(), *b"print(1)\n");
+    assert!(block_on(ws.read_bytes("data")).is_err());
+}
+
+#[test]
 fn a_large_repository_is_mounted_up_to_the_limit_and_says_so() {
     let names: Vec<String> = (0..MAX_MOUNT_FILES + 5)
         .map(|i| format!("data/f{i:04}.txt"))

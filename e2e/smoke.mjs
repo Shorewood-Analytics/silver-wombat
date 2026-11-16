@@ -130,7 +130,8 @@ async function launch(args, settings = {}) {
     // And while the test has cut the site off, requests are meant to fail.
     if (message.type() === "error" && !siteDown && !from.startsWith(CDN) && !from.startsWith("https://api.github.com/")) errors.push(message.text().slice(0, 300));
   });
-  page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 300)}`));
+  // The one request the test itself sends to a site it has cut off is meant to fail.
+  page.on("pageerror", (error) => error.message.includes("not-kept-") || errors.push(`uncaught: ${error.message.slice(0, 300)}`));
 }
 await launch(software);
 
@@ -283,6 +284,17 @@ try {
 
   // --- Files ---
   await scan("files");
+  // A picture in the repository opens to be looked at.
+  await press("Folder docs");
+  await press("icon.png");
+  const stored = layer.locator("img");
+  check(await eventually(async () => (await stored.count()) === 1 && (await stored.evaluate((img) => img.complete && img.naturalWidth === 180))), "a picture in the repository opens as a picture (180 pixels wide, as stored)");
+  check((await stored.getAttribute("alt")) === "/docs/icon.png, a picture in the repository", "and a screen reader is told which file it is");
+  await scan("a picture from the repository");
+  await press("Close /docs/icon.png");
+  check(await eventually(async () => (await stored.count()) === 0 && (await button("Choose a file").count()) === 1), "closing it gives the editor's place back");
+  await press("Choose a file");
+  await press("Up one folder");
   // Voice Control and Switch Control tap the centre of an element; that tap must reach the canvas.
   const box = await button("Folder app").evaluate((e) => e.getBoundingClientRect().toJSON());
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
@@ -394,7 +406,7 @@ try {
   await press("Save dot.png to this device");
   const file = await saved;
   check(file.suggestedFilename() === "dot.png" && (await readFile(await file.path())).equals(Buffer.from(dot, "base64")), "Save hands over the same file, byte for byte");
-  await press("Close the picture");
+  await press("Close dot.png");
   check(await eventually(async () => (await picture.count()) === 0 && (await layer.getByRole("log").count()) === 1), "Close brings the terminal's output back");
   await runLine("python -c 'print(5 * 1111)'");
   check((await says("5555", 30_000)) && (await eventually(async () => (await button("Show dot.png").count()) === 0)), "the next program's pictures replace it (here: none)");
@@ -427,7 +439,7 @@ try {
     const plot = layer.locator("img");
     const width = await eventually(async () => (await plot.count()) === 1 && (await plot.evaluate((img) => img.complete && img.naturalWidth > 100))) ? await plot.evaluate((img) => img.naturalWidth) : 0;
     check(width > 100, `and the plot can be looked at (${width} pixels wide)`);
-    await press("Close the picture");
+    await press("Close figure-1.png");
     await runLine(`pip install cowsay && python -c "import cowsay; print('cowsay', 'imported')"`);
     check(await says("cowsay imported", 180_000), "pip install fetches a pure-Python package from PyPI and Python imports it");
   } else {

@@ -43,6 +43,21 @@ pub fn join(dir: &str, name: &str) -> String {
     }
 }
 
+/// The media type of a picture a browser can show, going by the file's
+/// extension, or `None` if `path` is not one.
+#[must_use]
+pub fn picture_type(path: &str) -> Option<&'static str> {
+    let (_, extension) = file_name(path).rsplit_once('.')?;
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
 /// How a path is shown to the person: always with a leading slash.
 #[must_use]
 pub fn display(path: &str) -> String {
@@ -87,6 +102,16 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_a_picture_by_its_extension() {
+        assert_eq!(picture_type("docs/plot.png"), Some("image/png"));
+        assert_eq!(picture_type("PHOTO.JPG"), Some("image/jpeg"));
+        assert_eq!(picture_type("a/b.c/diagram.svg"), Some("image/svg+xml"));
+        assert_eq!(picture_type("notes.txt"), None);
+        assert_eq!(picture_type("png"), None);
+        assert_eq!(picture_type("folder.png/readme"), None);
+    }
 
     #[test]
     fn resolves_relative_and_absolute() {

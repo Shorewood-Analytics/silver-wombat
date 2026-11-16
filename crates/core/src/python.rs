@@ -358,7 +358,11 @@ impl PythonTool {
 
     /// Every text file in the repository, up to the limits. Returns the files
     /// and a note when something was left out.
-    async fn mount(workspace: &Workspace) -> Result<(Vec<(String, String)>, String), String> {
+    /// The repository's text files for the program, a note to print before
+    /// it runs, and how many files were held back for not being text.
+    async fn mount(
+        workspace: &Workspace,
+    ) -> Result<(Vec<(String, String)>, String, usize), String> {
         let listed = workspace
             .files_under("")
             .await
@@ -390,13 +394,7 @@ impl PythonTool {
                 MAX_MOUNT_BYTES / (1024 * 1024)
             );
         }
-        if skipped > 0 {
-            let _ = writeln!(
-                note,
-                "note: {skipped} file(s) that are not text were not given to Python."
-            );
-        }
-        Ok((files, note))
+        Ok((files, note, skipped))
     }
 
     async fn execute(
@@ -408,7 +406,7 @@ impl PythonTool {
         args: &[String],
     ) -> ExternalRun {
         let workspace = call.workspace;
-        let (files, note) = match Self::mount(workspace).await {
+        let (files, note, skipped) = match Self::mount(workspace).await {
             Ok(mounted) => mounted,
             Err(message) => return ExternalRun::fail(1, format!("python: {message}")),
         };
@@ -465,6 +463,16 @@ impl PythonTool {
                 err,
                 "note: not kept, because only text files can be saved so far: {}",
                 outcome.binary.join(", ")
+            );
+        }
+        // Worth saying only when something went wrong: it may be why.
+        if skipped > 0 && outcome.status != 0 {
+            let _ = writeln!(
+                err,
+                "note: {skipped} file{} in the repository {} not text and {} not given to Python.",
+                if skipped == 1 { "" } else { "s" },
+                if skipped == 1 { "is" } else { "are" },
+                if skipped == 1 { "was" } else { "were" },
             );
         }
         if !outcome.pictures.is_empty() {

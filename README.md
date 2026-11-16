@@ -110,7 +110,7 @@ Known gaps: a screen reader hears the end of the terminal output and of a diff, 
 - Apart from Python, the terminal has no machine behind it. `cargo`, `npm` and other programs answer "not available".
 - Local changes are kept in the browser's origin-private file system (Safari 26 or later; older browsers fall back to `localStorage`, about 5 MB). WebKit refuses that file system to a window that keeps nothing on disk, which is what a private window is, so there the small store is used too. More says which store is in use and, for the small one, the browser's reason. The app asks the browser not to evict it, but the browser may refuse, so the GitHub checkpoint is the durable copy. More > Export writes all changes to a patch file that `git apply` accepts.
 - GitHub sign-in with a browser redirect is not possible from a static page: GitHub's login endpoints do not allow cross-origin browser requests. A token is the only way in.
-- Only text files up to 2 MB open in the editor.
+- Only text files up to 2 MB open in the editor. A picture in the repository (PNG, JPEG, GIF or WebP, up to 8 MB) opens to be looked at, not edited. Other files that are not text cannot be opened.
 
 ## Token
 
@@ -155,6 +155,18 @@ For a faster, larger build while developing, use `cargo xtask dist --profile qui
 `.github/workflows/pages.yml` publishes the site to GitHub Pages each time `main` changes, after the same checks as a pull request.
 Pages has to be switched on once: **Settings > Pages > Build and deployment > Source: GitHub Actions**.
 The address is then <https://shorewood-analytics.github.io/silver-wombat/>. Until Pages is switched on the workflow does nothing.
+
+Use the `https` address on a real phone. Opened over plain `http` from another machine on the network, a browser withholds what it reserves for secure pages, which here means file storage, the service worker and WebGPU. (`http://localhost` counts as secure.)
+
+**In the iOS Simulator** (a Mac with Xcode). Build the site, or download the `dist` artifact from a CI run, then:
+
+```sh
+python3 -m http.server -d dist 8080 &
+open -a Simulator
+xcrun simctl openurl booted http://localhost:8080
+```
+
+The simulator uses the Mac's network, so `localhost` is the Mac. Safari on the Mac can inspect the page: Develop > Simulator. This has not been tried: there is no Mac where this was written.
 
 **Add it to the Home Screen.** In Safari: Share, then Add to Home Screen. Three reasons:
 
