@@ -523,6 +523,21 @@ impl Ide {
                 let _ = ide.update(cx, Self::page_hidden);
             });
         });
+        // A newer build of the app has been fetched: say so, wherever the
+        // person is. More has the button that switches to it.
+        let ide = cx.weak_entity();
+        platform::watch_update(move || {
+            let ide = ide.clone();
+            crate::with_app(|cx| {
+                let _ = ide.update(cx, |this, cx| {
+                    this.notice = Some(
+                        "A newer version of this app has been downloaded. More has a button to switch to it; otherwise it is used the next time the app is opened."
+                            .to_owned(),
+                    );
+                    cx.notify();
+                });
+            });
+        });
         // With a keyboard attached, Control or Command with K opens the finder,
         // wherever the keyboard's focus is.
         let ide = cx.weak_entity();
@@ -3141,6 +3156,35 @@ impl Ide {
             .into_any_element()
     }
 
+    /// About the app itself: a newer build waiting, and whether the app is
+    /// kept on this device.
+    fn app_settings(cx: &mut Context<Self>) -> Vec<Div> {
+        let mut rows = Vec::new();
+        if platform::update_ready() {
+            rows.push(Self::say(
+                "update",
+                Role::Status,
+                "A newer version of this app has been downloaded. Unsaved work is kept: it is on this device.",
+            ));
+            rows.push(Self::tap(
+                cx,
+                Tap::new("update-now", "Use the new version now")
+                    .named("Use the new version now (reloads the page)"),
+                |_, _, _| platform::apply_update(),
+            ));
+        }
+        rows.push(Self::say(
+            "offline",
+            Role::Text,
+            if platform::kept_on_device() {
+                "The app itself is kept on this device, so it opens with no connection. GitHub, new Python libraries and the suggestion model still need one."
+            } else {
+                "The app itself is not kept on this device yet, so opening it needs a connection."
+            },
+        ));
+        rows
+    }
+
     /// Says plainly where unsaved work lives and whether the browser may clear it.
     fn storage_note(&self) -> String {
         let place = match &self.kept {
@@ -3221,15 +3265,7 @@ impl Ide {
             .children(self.suggest_settings(cx))
             .children(Self::renderer_settings(cx))
             .child(Self::say("storage", Role::Text, self.storage_note()))
-            .child(Self::say(
-                "offline",
-                Role::Text,
-                if platform::kept_on_device() {
-                    "The app itself is kept on this device, so it opens with no connection. GitHub, new Python libraries and the suggestion model still need one."
-                } else {
-                    "The app itself is not kept on this device yet, so opening it needs a connection."
-                },
-            ))
+            .children(Self::app_settings(cx))
             .child(Self::tap(
                 cx,
                 Tap::new("export", "Export changes as a patch file").disabled(nothing),

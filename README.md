@@ -176,7 +176,7 @@ The simulator uses the Mac's network, so `localhost` is the Mac. Safari on the M
 - It gets the app's icon and name.
 
 **Without a connection.** After the first visit the app is kept on the device (by `sw.js`, a service worker) and opens with no connection. Editing, the terminal and any Python version used before all work; saves stay on the device and are checkpointed when GitHub can be reached again. GitHub itself, a Python library not used before and the suggestion model's download need a connection. More says whether the app is kept on the device.
-A new version is fetched in the background and used the next time the app is opened after every window of it has been closed, so a running app is never given files from a newer build.
+A new version is fetched in the background while the old one keeps running, so a running app is never given files from a newer build. When it has arrived the app says so, and More has a button, Use the new version now, that reloads onto it (unsaved work is on the device and comes back). Without that, it is used the next time the app is opened after every window of it has been closed. After publishing a change, expect the old version on the first visit and the notice a few seconds later.
 
 Tested in Chrome and in WebKit with the site made unreachable: the app opens, restores unsaved work and runs Python. Adding to a Home Screen has not been tried on a device.
 

@@ -306,6 +306,46 @@ pub fn kept_on_device() -> bool {
         .is_ok_and(|controller| controller.is_object())
 }
 
+/// What `web/boot.js` knows about a newer build of the app.
+fn update() -> Option<JsValue> {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("silverWombatUpdate"))
+        .ok()
+        .filter(JsValue::is_object)
+}
+
+/// Whether a newer build of the app has been fetched and is waiting.
+pub fn update_ready() -> bool {
+    update()
+        .and_then(|update| js_sys::Reflect::get(&update, &JsValue::from_str("ready")).ok())
+        .is_some_and(|ready| ready.is_truthy())
+}
+
+/// Switches to the waiting build. The page reloads when it has taken over.
+pub fn apply_update() {
+    let apply = update()
+        .and_then(|update| js_sys::Reflect::get(&update, &JsValue::from_str("apply")).ok())
+        .and_then(|apply| apply.dyn_into::<js_sys::Function>().ok());
+    if let Some(apply) = apply {
+        let _ = apply.call0(&JsValue::NULL);
+    }
+}
+
+/// Calls `on_ready` when a newer build of the app has been fetched.
+pub fn watch_update(on_ready: impl Fn() + 'static) {
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let listener = Closure::<dyn FnMut()>::new(on_ready);
+    let _ = window.add_event_listener_with_callback(
+        "silver-wombat-update",
+        listener.as_ref().unchecked_ref(),
+    );
+    // Lives as long as the page.
+    listener.forget();
+}
+
 /// Removes a setting saved on this device.
 pub fn forget(key: &str) {
     if let Ok(storage) = storage() {

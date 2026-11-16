@@ -56,4 +56,37 @@ try {
 
 // Keep a copy of the app on the device, so that it opens with no connection
 // (see sw.js). The app works without this; a browser that refuses is not an error.
-navigator.serviceWorker?.register("sw.js").catch((error) => console.warn("The app could not be kept on this device:", error));
+//
+// A newer build, once fetched, waits until the app has been closed everywhere.
+// The app is told one is waiting (`silverWombatUpdate.ready`, and an event)
+// so that it can offer to switch at once; `apply` does the switch, after
+// which every open window of the app reloads onto the new build.
+const update = { ready: false, apply: () => {} };
+globalThis.silverWombatUpdate = update;
+if (navigator.serviceWorker) {
+  // The first visit also gains a service worker; that is not an update.
+  const hadOne = navigator.serviceWorker.controller !== null;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadOne || reloading) return;
+    reloading = true;
+    location.reload();
+  });
+  navigator.serviceWorker
+    .register("sw.js")
+    .then((registration) => {
+      const look = () => {
+        if (update.ready || !registration.waiting || !navigator.serviceWorker.controller) return;
+        update.ready = true;
+        update.apply = () => registration.waiting?.postMessage("use-now");
+        dispatchEvent(new Event("silver-wombat-update"));
+      };
+      look();
+      registration.addEventListener("updatefound", () => registration.installing?.addEventListener("statechange", look));
+      // An app left open for days, as on a Home Screen, would otherwise never look.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") registration.update().catch(() => {});
+      });
+    })
+    .catch((error) => console.warn("The app could not be kept on this device:", error));
+}

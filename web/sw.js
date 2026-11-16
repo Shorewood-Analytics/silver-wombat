@@ -19,9 +19,9 @@ self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL.map((path) => new Request(path, FRESH)))));
 });
 
-// A new version waits until no page is using the old one (there is no
-// skipWaiting here), so a running app is never handed files from a newer
-// build. Once it takes over, the older versions' files are deleted.
+// A new version waits until no page is using the old one, so a running app
+// is never handed files from a newer build. Once it takes over, the older
+// versions' files are deleted.
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
@@ -31,6 +31,13 @@ self.addEventListener("activate", (event) => {
       await self.clients.claim();
     })(),
   );
+});
+
+// The person chose to switch to this version now, without closing the app.
+// Every open window of the app reloads when this takes over (see boot.js),
+// so none is left running the old build against the new files.
+self.addEventListener("message", (event) => {
+  if (event.data === "use-now") self.skipWaiting();
 });
 
 // This site's own files come from the copy on the device. One not copied yet

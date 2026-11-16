@@ -48,6 +48,9 @@ const reachesGitHub = await fetch("https://api.github.com/zen", { signal: AbortS
 const fixtures = join(here, "fixtures");
 // Set to make the site unreachable, as with no connection: every request is cut off.
 let siteDown = false;
+// Set to serve the site as a newer build would be: the same files, with
+// another version in the service worker.
+let newerBuild = false;
 const server = createServer(async (request, response) => {
   if (siteDown) return request.socket.destroy();
   const path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname));
@@ -56,7 +59,8 @@ const server = createServer(async (request, response) => {
   const file = fixture ? join(fixtures, fixture[1], fixture[2]) : join(dist, path === "/" || path === "\\" ? "index.html" : path);
   if (!file.startsWith(root)) return response.writeHead(403).end();
   try {
-    const body = await readFile(file);
+    let body = await readFile(file);
+    if (newerBuild && path.endsWith("sw.js")) body = body.toString().replace(/(const VERSION = "\w+)"/, '$1next"');
     response.writeHead(200, { "Content-Type": types[extname(file)] ?? "application/octet-stream" }).end(body);
   } catch {
     response.writeHead(404).end();
@@ -762,6 +766,19 @@ try {
     await runLine("python -c 'print(6 * 1111)'");
     check(await says("6666", 60_000), "and Python, used before, runs with the site unreachable");
     siteDown = false;
+
+    // A newer build of the app: the app says one is waiting, and can switch
+    // to it without being closed.
+    const builds = () => page.evaluate(async () => (await caches.keys()).filter((name) => name.startsWith("silver-wombat-")));
+    const [old] = await builds();
+    newerBuild = true;
+    await page.evaluate(() => navigator.serviceWorker.getRegistration().then((registration) => registration.update()));
+    check(await status("A newer version of this app has been downloaded", 60_000), "when a newer build has been fetched, the app says so, wherever the person is");
+    await press("More");
+    await press("Use the new version now (reloads the page)");
+    await button("Try the demo (no account)").waitFor({ state: "attached", timeout: 60_000 });
+    const now = await eventually(async () => { const names = await builds(); return names.length === 1 && names[0] === `${old}next`; }, 20_000);
+    check(now, `switching reloads the app onto the newer build and removes the older one's files${now ? "" : ` (kept: ${(await builds()).join(", ")}; was: ${old})`}`);
   }
 
   // --- A model load that never finished is not walked into again ---
