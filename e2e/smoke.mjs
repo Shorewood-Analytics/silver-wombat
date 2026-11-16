@@ -130,8 +130,7 @@ async function launch(args, settings = {}) {
     // And while the test has cut the site off, requests are meant to fail.
     if (message.type() === "error" && !siteDown && !from.startsWith(CDN) && !from.startsWith("https://api.github.com/")) errors.push(message.text().slice(0, 300));
   });
-  // The one request the test itself sends to a site it has cut off is meant to fail.
-  page.on("pageerror", (error) => error.message.includes("not-kept-") || errors.push(`uncaught: ${error.message.slice(0, 300)}`));
+  page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 300)}`));
 }
 await launch(software);
 
@@ -638,6 +637,48 @@ try {
   await press("Commit to main");
   check(await hears("status", (text) => text.startsWith("Committed")), "after choosing, the commit goes through");
 
+  // Merging: someone else changes the file again; this time the change made
+  // here is to other lines, so the two can be combined.
+  const commitAs = async (message) => {
+    await press("Changes");
+    await typeInto("Commit message", message);
+    await press("Commit to main");
+  };
+  await press("More");
+  await press("Demo: someone else changes a file on GitHub");
+  await press("Terminal");
+  await runLine("echo '# top note' > top.py && cat app/greet.py >> top.py && cat top.py > app/greet.py && rm top.py");
+  await commitAs("A note at the top");
+  check(await status("also changed on GitHub since you started"), "the commit is refused again: the file changed on GitHub too");
+  await press("Merge both versions of /app/greet.py");
+  check(await status("Merged /app/greet.py: your changes and GitHub's are both in it"), "Merge both combines changes to different lines and says so");
+  await press("Terminal");
+  await runLine("clear");
+  await runLine("cat app/greet.py");
+  check((await says("# top note", 15_000)) && (await says("Hello there")) && (await heard("log")).every((text) => !text.includes("<<<<<<<")), "the merged file has the line added here and the line changed on GitHub, and no markers");
+  await commitAs("A note at the top");
+  check(await hears("status", (text) => text.startsWith("Committed")), "and it commits");
+
+  // The same line changed on both sides cannot be combined: both versions
+  // are left in the file, marked, and a commit waits until that is settled.
+  await press("More");
+  await press("Demo: someone else changes a file on GitHub");
+  await press("Terminal");
+  await runLine("echo '# a better note' > top.py && tail -n 2 app/greet.py >> top.py && cat top.py > app/greet.py && rm top.py");
+  await commitAs("A better note");
+  await press("Merge both versions of /app/greet.py");
+  check(await status("except for 1 place where both changed the same lines"), "where both changed the same line, Merge both says how many places are left to settle");
+  await press("Terminal");
+  await runLine("clear");
+  await runLine("head -n 4 app/greet.py");
+  check((await says("<<<<<<< mine", 15_000)) && (await says("# a better note")) && (await says(">>>>>>> GitHub")), "both versions are in the file between marker lines");
+  await commitAs("A better note");
+  check(await status("still has places marked <<<<<<< mine"), "a commit is refused while a marked place is left");
+  await press("Terminal");
+  await runLine("echo '# a settled note' > top.py && tail -n 2 app/greet.py >> top.py && cat top.py > app/greet.py && rm top.py");
+  await commitAs("Settled");
+  check(await hears("status", (text) => text.startsWith("Committed")), "once the marked place is settled, the commit goes through");
+
   // --- Files from this device ---
   await press("Files");
   const importButton = await button("Add files from this device").evaluate((e) => e.getBoundingClientRect().toJSON());
@@ -705,7 +746,8 @@ try {
     await press("More");
     check(await hears("paragraph", (text) => text.includes("The app itself is kept on this device")), "the settings say that the app opens with no connection");
     siteDown = true;
-    const unreachable = await page.evaluate(() => fetch(`not-kept-${Date.now()}.txt`).then(() => false, () => true));
+    // Asked from here, not from the page: the page is the thing being tested.
+    const unreachable = await fetch(`${url}index.html`).then(() => false, () => true);
     let opened = false;
     try {
       await openDemo();

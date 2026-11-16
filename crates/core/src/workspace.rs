@@ -978,6 +978,73 @@ impl Workspace {
     ///
     /// Until one of the two is chosen the conflict stays, however the file is
     /// edited: nothing of someone else's is replaced without that choice.
+    /// Settles a conflict by combining the two sides: the changes made here
+    /// and the changes on GitHub, both against the version they started
+    /// from. Returns how many places changed on both sides in different
+    /// ways; those are left in the file between marker lines (see
+    /// [`diff::merge`]) for the person to settle before committing.
+    pub async fn merge_theirs(&self, file: &str) -> Result<usize> {
+        let not_text = || {
+            Error::Invalid(format!(
+                "{} can only be merged when both versions are text. Keep yours or use GitHub's.",
+                path::display(file)
+            ))
+        };
+        let Some(Draft::Write {
+            content,
+            base_sha,
+            mode,
+        }) = self.draft(file)
+        else {
+            return Err(not_text());
+        };
+        let root = self.state.borrow().root_tree.clone();
+        let Some(theirs_sha) = self.entry_in(&root, file).await?.map(|entry| entry.sha) else {
+            return Err(Error::Invalid(format!(
+                "{} was deleted on GitHub, so there is nothing to merge with. Keep yours or use GitHub's.",
+                path::display(file)
+            )));
+        };
+        let text_of =
+            |bytes: Rc<Vec<u8>>| String::from_utf8(bytes.to_vec()).map_err(|_| not_text());
+        // A file new on both sides started from nothing.
+        let base = match &base_sha {
+            Some(sha) => text_of(self.blob(sha).await?)?,
+            None => String::new(),
+        };
+        let theirs = text_of(self.blob(&theirs_sha).await?)?;
+        let merged = diff::merge(&base, &content, &theirs).ok_or_else(|| {
+            Error::Invalid(format!(
+                "{} is too long to merge here. Keep yours or use GitHub's.",
+                path::display(file)
+            ))
+        })?;
+        self.set_draft(
+            file,
+            Some(Draft::Write {
+                content: merged.text,
+                base_sha: Some(theirs_sha),
+                mode,
+            }),
+        );
+        Ok(merged.conflicts)
+    }
+
+    /// Changed files that still hold a place a merge left for the person
+    /// to settle.
+    #[must_use]
+    pub fn unsettled(&self) -> Vec<String> {
+        let state = self.state.borrow();
+        state
+            .overlay
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(&entry.draft, Draft::Write { content, .. } if diff::has_marks(content))
+            })
+            .map(|(file, _)| file.clone())
+            .collect()
+    }
+
     pub async fn keep_mine(&self, file: &str) -> Result<()> {
         let draft = self
             .draft(file)
@@ -1115,6 +1182,15 @@ impl Workspace {
         };
         if drafts.is_empty() {
             return Err(Error::Invalid("Nothing to commit.".to_owned()));
+        }
+        let unsettled = self.unsettled();
+        if !unsettled.is_empty() {
+            let files: Vec<String> = unsettled.iter().map(|file| path::display(file)).collect();
+            return Err(Error::Invalid(format!(
+                "Not committed: {} still has places marked {} where both sides changed the same lines. Edit them to what they should be, remove the marker lines, then commit.",
+                files.join(", "),
+                diff::MARK_START
+            )));
         }
         let branch = self.branch();
         let latest = self

@@ -1397,6 +1397,49 @@ impl Ide {
         .detach();
     }
 
+    /// Settles a conflict by combining this device's changes with GitHub's.
+    fn merge_theirs(&mut self, file: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let workspace = work.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let merged = workspace.merge_theirs(&file).await;
+            this.update_in(cx, |this, window, cx| match merged {
+                Ok(places) => {
+                    let shown = path::display(&file);
+                    let mut open = false;
+                    if let Some(work) = &mut this.work {
+                        work.conflicts.retain(|path| *path != file);
+                        open = work.open.as_deref() == Some(file.as_str());
+                    }
+                    this.notice = Some(match places {
+                        0 => format!(
+                            "Merged {shown}: your changes and GitHub's are both in it. Look it over, then commit."
+                        ),
+                        1 => format!(
+                            "Merged {shown}, except for 1 place where both changed the same lines. Both versions are in the file there, between lines starting <<<<<<< and >>>>>>>. Edit it to what it should be, then commit."
+                        ),
+                        places => format!(
+                            "Merged {shown}, except for {places} places where both changed the same lines. Both versions are in the file there, between lines starting <<<<<<< and >>>>>>>. Edit them to what they should be, then commit."
+                        ),
+                    });
+                    // The editor must show the merged text, not what was there before.
+                    if open {
+                        this.load_file(file, false, window, cx);
+                    }
+                    this.changed(window, cx);
+                }
+                // The file stays as it was; say why it could not be merged.
+                Err(Error::Invalid(reason)) => {
+                    this.notice = Some(reason);
+                    cx.notify();
+                }
+                Err(error) => this.fail(&error, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Demo only: changes a file in the demo repository as if someone else
     /// had pushed, so the person can see how a conflict is handled.
     fn demo_teammate(&mut self, cx: &mut Context<Self>) {
@@ -2944,16 +2987,25 @@ impl Ide {
         // In conflict: this file changed on GitHub too. Nothing of theirs is
         // replaced, and nothing of the person's is dropped, until they choose.
         let for_mine = change.path.clone();
+        let for_merge = change.path.clone();
         row.child(Self::say(
             &format!("change-{index}"),
             Role::Text,
-            format!("{kind}: {shown}. Also changed on GitHub. Choose which version to keep."),
+            format!(
+                "{kind}: {shown}. Also changed on GitHub. Merge the two, or choose which version to keep."
+            ),
         ))
         .child(Self::tap(
             cx,
             Tap::new(format!("diff-{index}"), "Compare with GitHub's")
                 .named(format!("Compare {shown} with GitHub's version")),
             move |this, window, cx| this.show_diff(for_diff.clone(), true, window, cx),
+        ))
+        .child(Self::tap(
+            cx,
+            Tap::new(format!("merge-{index}"), "Merge both")
+                .named(format!("Merge both versions of {shown}")),
+            move |this, window, cx| this.merge_theirs(for_merge.clone(), window, cx),
         ))
         .child(
             h_flex()

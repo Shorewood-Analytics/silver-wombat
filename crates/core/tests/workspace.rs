@@ -252,6 +252,91 @@ fn a_conflicting_remote_change_blocks_the_commit_and_writes_nothing() {
 }
 
 #[test]
+fn a_conflict_is_settled_by_merging_both_sides() {
+    let fake = Rc::new(FakeGitHub::new("tester"));
+    let poem = "one\ntwo\nthree\nfour\nfive\nsix\n";
+    fake.add_repo(
+        REPO,
+        "main",
+        &[
+            ("poem.txt", poem),
+            ("clash.txt", "a\nb\nc\n"),
+            ("gone.txt", "x\n"),
+        ],
+    );
+    let ws = block_on(Workspace::open(GitHub::new(fake.clone()), REPO, "main")).unwrap();
+    block_on(ws.write("poem.txt", "ONE\ntwo\nthree\nfour\nfive\nsix\n")).unwrap();
+    block_on(ws.write("clash.txt", "a\nmine\nc\n")).unwrap();
+    block_on(ws.write("gone.txt", "x\nmine\n")).unwrap();
+    block_on(ws.write("both-new.txt", "same on both sides\n")).unwrap();
+    let theirs = fake.push(
+        REPO,
+        "main",
+        "Their change",
+        &[
+            (
+                "poem.txt",
+                Some("one\ntwo\nthree\nfour\nfive\nSIX\nseven\n"),
+            ),
+            ("clash.txt", Some("a\ntheirs\nc\n")),
+            ("gone.txt", None),
+            ("both-new.txt", Some("same on both sides\n")),
+        ],
+    );
+    assert!(matches!(
+        block_on(ws.commit("Mine")),
+        Err(Error::Conflict(_))
+    ));
+    block_on(ws.refresh()).unwrap();
+
+    // Changes to different lines: both are kept and nothing is left to settle.
+    assert_eq!(block_on(ws.merge_theirs("poem.txt")).unwrap(), 0);
+    assert_eq!(
+        block_on(ws.read_text("poem.txt")).unwrap(),
+        "ONE\ntwo\nthree\nfour\nfive\nSIX\nseven\n"
+    );
+    // A file both sides created with the same text merges against nothing.
+    assert_eq!(block_on(ws.merge_theirs("both-new.txt")).unwrap(), 0);
+    // A file deleted on GitHub has nothing to merge with.
+    let refused = block_on(ws.merge_theirs("gone.txt"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("deleted on GitHub"), "{refused}");
+    block_on(ws.keep_mine("gone.txt")).unwrap();
+
+    // The same line changed two ways: both versions stay in the file, marked,
+    // and a commit is refused until the person has settled it.
+    assert_eq!(block_on(ws.merge_theirs("clash.txt")).unwrap(), 1);
+    assert_eq!(
+        block_on(ws.read_text("clash.txt")).unwrap(),
+        "a\n<<<<<<< mine\nmine\n=======\ntheirs\n>>>>>>> GitHub\nc\n"
+    );
+    assert_eq!(ws.unsettled(), ["clash.txt"]);
+    assert_eq!(block_on(ws.conflicts()).unwrap(), Vec::<String>::new());
+    let refused = block_on(ws.commit("Too soon")).unwrap_err().to_string();
+    assert!(
+        refused.contains("/clash.txt still has places marked <<<<<<< mine"),
+        "{refused}"
+    );
+    assert_eq!(fake.head(REPO, "main").unwrap(), theirs);
+
+    block_on(ws.write("clash.txt", "a\nmine and theirs\nc\n")).unwrap();
+    assert_eq!(ws.unsettled(), Vec::<String>::new());
+    let outcome = block_on(ws.commit("Merged")).unwrap();
+    let (_, parents) = fake.commit_info(REPO, &outcome.sha).unwrap();
+    assert_eq!(parents, [theirs]);
+    assert_eq!(
+        fake.file(REPO, "main", "poem.txt").unwrap(),
+        "ONE\ntwo\nthree\nfour\nfive\nSIX\nseven\n"
+    );
+    assert_eq!(
+        fake.file(REPO, "main", "clash.txt").unwrap(),
+        "a\nmine and theirs\nc\n"
+    );
+    assert_eq!(fake.file(REPO, "main", "gone.txt").unwrap(), "x\nmine\n");
+}
+
+#[test]
 fn a_conflict_is_settled_by_choosing_a_side() {
     let (fake, ws) = setup();
     block_on(ws.write("src/main.py", "mine\n")).unwrap();
