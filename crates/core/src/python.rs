@@ -133,6 +133,31 @@ pub struct Outcome {
     /// Files the program wrote that are not text, which cannot be kept yet.
     #[serde(default)]
     pub binary: Vec<String>,
+    /// Pictures the program wrote, to be shown.
+    #[serde(default)]
+    pub pictures: Vec<Picture>,
+}
+
+/// A picture a program wrote, such as a plot.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Picture {
+    pub path: String,
+    /// Its media type, such as `image/png`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The file's bytes in base64.
+    pub data: String,
+}
+
+impl Picture {
+    /// The file's bytes, or `None` if the data is not valid base64.
+    #[must_use]
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(&self.data)
+            .ok()
+    }
 }
 
 /// Runs Python. `Err` means the interpreter could not be started at all, for
@@ -440,6 +465,18 @@ impl PythonTool {
                 err,
                 "note: not kept, because only text files can be saved so far: {}",
                 outcome.binary.join(", ")
+            );
+        }
+        if !outcome.pictures.is_empty() {
+            let names: Vec<&str> = outcome
+                .pictures
+                .iter()
+                .map(|picture| picture.path.as_str())
+                .collect();
+            let _ = writeln!(
+                err,
+                "note: pictures written: {}. The Show buttons under the terminal open them.",
+                names.join(", ")
             );
         }
         ExternalRun {

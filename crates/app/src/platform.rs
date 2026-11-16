@@ -550,14 +550,43 @@ pub fn download(name: &str, text: &str) -> Result<(), String> {
         options.set_type("text/plain;charset=utf-8");
         let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &options)?;
         let url = web_sys::Url::create_object_url_with_blob(&blob)?;
-        let document = web_sys::window()
-            .and_then(|window| window.document())
-            .ok_or_else(|| JsValue::from_str("no document"))?;
-        let link: web_sys::HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
-        link.set_href(&url);
-        link.set_download(name);
-        link.click();
-        web_sys::Url::revoke_object_url(&url)
+        let sent = download_from(name, &url);
+        web_sys::Url::revoke_object_url(&url)?;
+        sent
     };
     run().map_err(|error| describe(&error))
+}
+
+fn download_from(name: &str, url: &str) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("no document"))?;
+    let link: web_sys::HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
+    link.set_href(url);
+    link.set_download(name);
+    link.click();
+    Ok(())
+}
+
+/// Hands the person the file behind a [`file_address`] to keep.
+pub fn download_address(name: &str, address: &str) -> Result<(), String> {
+    download_from(name, address).map_err(|error| describe(&error))
+}
+
+/// Holds a file's bytes in the browser and returns an address for them that
+/// an `<img>` can show and a download can save. Give the address back to
+/// [`forget_address`] when it is no longer needed, to free the bytes.
+pub fn file_address(bytes: &[u8], media_type: &str) -> Result<String, String> {
+    let run = || -> Result<String, JsValue> {
+        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+        let options = web_sys::BlobPropertyBag::new();
+        options.set_type(media_type);
+        let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options)?;
+        web_sys::Url::create_object_url_with_blob(&blob)
+    };
+    run().map_err(|error| describe(&error))
+}
+
+pub fn forget_address(address: &str) {
+    let _ = web_sys::Url::revoke_object_url(address);
 }

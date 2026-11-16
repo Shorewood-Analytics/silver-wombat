@@ -377,6 +377,23 @@ try {
   check((await eventually(async () => (await heard("log")).some((text) => /^red text here$/m.test(text)), 30_000)) && (await heard("log")).every((text) => !text.includes("\u001b")), "colour codes in a program's output are not shown as text");
   await runLine(`python -c "import sys, time; [(sys.stderr.write(chr(13) + 'step %d of 3' % n), sys.stderr.flush(), time.sleep(0.4)) for n in (1, 2, 3)]; print(chr(13) + 'finished %d steps' % 3)"`);
   check((await says("finished 3 steps", 30_000)) && (await heard("log")).every((text) => !text.includes("step 1 of 3") && !text.includes("step 3 of 3")), "a progress line that redraws itself stays one line");
+  // A picture the program writes can be looked at and saved to the device.
+  const dot = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  await runLine(`python -c "import base64; open('dot.png', 'wb').write(base64.b64decode('${dot}')); print('wrote', 'the', 'dot')"`);
+  check((await says("wrote the dot", 30_000)) && (await says("pictures written: dot.png")), "a picture written by a program is reported in the terminal");
+  await press("Show dot.png");
+  const picture = layer.locator("img");
+  check(await eventually(async () => (await picture.count()) === 1 && (await picture.evaluate((img) => img.complete && img.naturalWidth === 1))), "Show opens it: the browser decoded the picture (1 pixel wide, as written)");
+  check((await picture.getAttribute("alt")) === "dot.png, a picture the program wrote", "a screen reader is told what the picture is");
+  await scan("terminal with a picture");
+  const saved = page.waitForEvent("download", { timeout: 10_000 });
+  await press("Save dot.png to this device");
+  const file = await saved;
+  check(file.suggestedFilename() === "dot.png" && (await readFile(await file.path())).equals(Buffer.from(dot, "base64")), "Save hands over the same file, byte for byte");
+  await press("Close the picture");
+  check(await eventually(async () => (await picture.count()) === 0 && (await layer.getByRole("log").count()) === 1), "Close brings the terminal's output back");
+  await runLine("python -c 'print(5 * 1111)'");
+  check((await says("5555", 30_000)) && (await eventually(async () => (await button("Show dot.png").count()) === 0)), "the next program's pictures replace it (here: none)");
   // Typing the next command while the last one is still running.
   await runLine(`python -c "import time; time.sleep(3); print(3030 * 3)"`);
   await field("Command").dispatchEvent("click");
@@ -399,6 +416,13 @@ try {
       await runLine(`uv python pin ${version} && python -c "import numpy; print('numpy', numpy.__version__)"`);
       check(await says(`numpy ${numpy}`, 180_000), `Python ${version} downloads numpy from the CDN on import (numpy ${numpy})`);
     }
+    await runLine(`uv python pin 3.14 && python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.plot([1, 4, 9]); plt.savefig('plot.png'); print('plot', 'saved')"`);
+    check((await says("plot saved", 240_000)) && (await eventually(async () => (await button("Show plot.png").count()) === 1)), "matplotlib downloads from the CDN and saves a plot");
+    await press("Show plot.png");
+    const plot = layer.locator("img");
+    const width = await eventually(async () => (await plot.count()) === 1 && (await plot.evaluate((img) => img.complete && img.naturalWidth > 100))) ? await plot.evaluate((img) => img.naturalWidth) : 0;
+    check(width > 100, `and the plot can be looked at (${width} pixels wide)`);
+    await press("Close the picture");
     await runLine(`pip install cowsay && python -c "import cowsay; print('cowsay', 'imported')"`);
     check(await says("cowsay imported", 180_000), "pip install fetches a pure-Python package from PyPI and Python imports it");
   } else {

@@ -80,6 +80,12 @@ body > canvas {
   -webkit-user-select: text;
   user-select: text;
 }
+/* Pictures a program wrote are real images too, scaled to fit their space. */
+#a11y > img {
+  object-fit: contain;
+  background: #ffffff;
+  border-radius: 8px;
+}
 #a11y > input[type="password"]::placeholder {
   color: #a3abbd;
 }

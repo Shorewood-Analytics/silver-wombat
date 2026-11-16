@@ -19,7 +19,7 @@ use silver_wombat_core::Error;
 use silver_wombat_core::complete::{self, Model, Processor, Reply};
 use silver_wombat_core::fake::FakeGitHub;
 use silver_wombat_core::github::{GitHub, Repo};
-use silver_wombat_core::python::PythonTool;
+use silver_wombat_core::python::{Picture, PythonTool};
 use silver_wombat_core::screen::{self, Cap, KEY_PAGES, Layout, Pane, Press};
 use silver_wombat_core::shell::Shell;
 use silver_wombat_core::workspace::MAX_TEXT_BYTES;
@@ -220,6 +220,18 @@ struct Session {
     demo_server: Option<Rc<FakeGitHub>>,
 }
 
+/// A picture a program wrote, held by the browser so it can be shown.
+struct Shown {
+    name: String,
+    address: String,
+}
+
+impl Drop for Shown {
+    fn drop(&mut self) {
+        platform::forget_address(&self.address);
+    }
+}
+
 struct Work {
     workspace: Rc<Workspace>,
     shell: Rc<Shell>,
@@ -227,6 +239,9 @@ struct Work {
     entries: Vec<DirEntry>,
     open: Option<String>,
     terminal_text: term::Display,
+    /// The pictures the last Python program wrote, and the one being looked at.
+    pictures: Vec<Shown>,
+    viewing: Option<usize>,
     history_at: Option<usize>,
     diff_of: Option<String>,
     /// Changed files that have also changed on GitHub, found when a commit
@@ -738,6 +753,8 @@ impl Ide {
                         entries,
                         open: None,
                         terminal_text: term::Display::new(),
+                        pictures: Vec::new(),
+                        viewing: None,
                         history_at: None,
                         diff_of: None,
                         conflicts: Vec::new(),
@@ -964,6 +981,15 @@ impl Ide {
     fn new_shell(window: &mut Window, cx: &mut Context<Self>) -> Rc<Shell> {
         let ide = cx.entity().downgrade();
         let handle = window.window_handle();
+        let viewer = ide.clone();
+        let pictures = Rc::new(move |pictures: Vec<Picture>| {
+            let ide = viewer.clone();
+            crate::with_app(|cx| {
+                let _ = handle.update(cx, |_, _, cx| {
+                    let _ = ide.update(cx, |this, cx| this.show_pictures(&pictures, cx));
+                });
+            });
+        });
         let print = Rc::new(move |text: String| {
             let ide = ide.clone();
             crate::with_app(|cx| {
@@ -979,9 +1005,79 @@ impl Ide {
         let shell = Shell::new();
         shell.set_live_output(true);
         shell.add_tool(Rc::new(PythonTool::new(Rc::new(WorkerPython::new(
-            progress, output,
+            progress, output, pictures,
         )))));
         Rc::new(shell)
+    }
+
+    /// Takes the pictures the last Python program wrote, replacing those of
+    /// the run before. They are held by the browser, not kept in the repository.
+    fn show_pictures(&mut self, pictures: &[Picture], cx: &mut Context<Self>) {
+        let Some(work) = &mut self.work else { return };
+        work.viewing = None;
+        work.pictures = pictures
+            .iter()
+            .filter_map(|picture| {
+                let address = platform::file_address(&picture.bytes()?, &picture.kind).ok()?;
+                Some(Shown {
+                    name: picture.path.clone(),
+                    address,
+                })
+            })
+            .collect();
+        cx.notify();
+    }
+
+    fn view_picture(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(work) = &mut self.work {
+            work.viewing = index.filter(|index| *index < work.pictures.len());
+            cx.notify();
+        }
+    }
+
+    fn save_picture(&mut self, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let Some(picture) = work.viewing.and_then(|index| work.pictures.get(index)) else {
+            return;
+        };
+        // Only the file's own name: a download cannot choose a folder.
+        let name = picture.name.rsplit('/').next().unwrap_or(&picture.name);
+        if let Err(reason) = platform::download_address(name, &picture.address) {
+            self.notice = Some(format!("The picture could not be saved: {reason}"));
+            cx.notify();
+        }
+    }
+
+    /// One picture, as large as the pane allows, in place of the output.
+    fn picture_view(name: &str, address: &str, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .p_2()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(Self::say("picture-name", Role::Section, name.to_owned()).flex_1())
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("picture-save", "Save")
+                            .named(format!("Save {name} to this device")),
+                        |this, _, cx| this.save_picture(cx),
+                    ))
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("picture-close", "Close").named("Close the picture"),
+                        |this, _, cx| this.view_picture(None, cx),
+                    )),
+            )
+            .child(div().relative().flex_1().min_h_0().child(mirror::picture(
+                "picture",
+                format!("{name}, a picture the program wrote"),
+                address,
+            )))
+            .into_any_element()
     }
 
     fn print(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -2575,6 +2671,58 @@ impl Ide {
             .into_any_element()
     }
 
+    /// A button for each picture the last Python program wrote.
+    fn picture_buttons(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let Some(work) = &self.work else {
+            return Vec::new();
+        };
+        work.pictures
+            .iter()
+            .enumerate()
+            .map(|(index, picture)| {
+                Self::tap(
+                    cx,
+                    Tap::new(format!("picture-{index}"), format!("Show {}", picture.name)),
+                    move |this, _, cx| this.view_picture(Some(index), cx),
+                )
+            })
+            .collect()
+    }
+
+    /// The top of the terminal pane: the output, or the picture being looked at.
+    fn terminal_output(&self, cx: &mut Context<Self>) -> AnyElement {
+        let viewing = self.work.as_ref().and_then(|work| {
+            let picture = work.pictures.get(work.viewing?)?;
+            Some((picture.name.clone(), picture.address.clone()))
+        });
+        if let Some((name, address)) = viewing {
+            return Self::picture_view(&name, &address, cx);
+        }
+        // What a screen reader hears: the most recent output, not the whole scrollback.
+        let recent = match &self.work {
+            Some(work) => tail(&work.terminal_text.text(), 3000).to_owned(),
+            None => String::new(),
+        };
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                Editor::new(&self.terminal)
+                    .aria_label("Terminal output")
+                    .line_height(relative(1.5))
+                    .h_full(),
+            )
+            .child(mirror::mark(
+                "terminal-output",
+                Role::Log,
+                recent,
+                false,
+                None,
+            ))
+            .into_any_element()
+    }
+
     fn terminal_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.busy;
         let quick = |key: &'static str, label: &'static str, cx: &mut Context<Self>| {
@@ -2584,38 +2732,19 @@ impl Ide {
                 move |this, window, cx| this.run_command(label.to_owned(), window, cx),
             )
         };
-        // What a screen reader hears: the most recent output, not the whole scrollback.
-        let recent = match &self.work {
-            Some(work) => tail(&work.terminal_text.text(), 3000).to_owned(),
-            None => String::new(),
-        };
+        let shows = self.picture_buttons(cx);
         v_flex()
             .size_full()
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        Editor::new(&self.terminal)
-                            .aria_label("Terminal output")
-                            .line_height(relative(1.5))
-                            .h_full(),
-                    )
-                    .child(mirror::mark(
-                        "terminal-output",
-                        Role::Log,
-                        recent,
-                        false,
-                        None,
-                    )),
-            )
+            .child(self.terminal_output(cx))
             .child(
                 v_flex()
                     .p_2()
                     .gap_2()
                     .border_t_1()
                     .border_color(cx.theme().border)
+                    .when(!shows.is_empty(), |column| {
+                        column.child(h_flex().gap_2().flex_wrap().children(shows))
+                    })
                     .child(
                         h_flex()
                             .gap_2()

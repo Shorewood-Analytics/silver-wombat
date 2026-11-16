@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use silver_wombat_core::http::LocalBoxFuture;
-use silver_wombat_core::python::{Job, Outcome, PythonHost};
+use silver_wombat_core::python::{Job, Outcome, Picture, PythonHost};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -32,6 +32,7 @@ struct State {
     next_id: Cell<u32>,
     progress: Rc<dyn Fn(&str)>,
     output: Rc<dyn Fn(&str)>,
+    pictures: Rc<dyn Fn(Vec<Picture>)>,
 }
 
 impl State {
@@ -95,7 +96,13 @@ impl WorkerPython {
     /// `progress` receives short notes while Python starts and loads
     /// libraries, and `output` what a program prints while it runs (for a
     /// job that asked for that): both for showing in the terminal.
-    pub fn new(progress: Rc<dyn Fn(&str)>, output: Rc<dyn Fn(&str)>) -> Self {
+    /// `pictures` receives the pictures a program wrote, after every run
+    /// (none, if it wrote none).
+    pub fn new(
+        progress: Rc<dyn Fn(&str)>,
+        output: Rc<dyn Fn(&str)>,
+        pictures: Rc<dyn Fn(Vec<Picture>)>,
+    ) -> Self {
         Self {
             state: Rc::new(State {
                 running: RefCell::new(None),
@@ -103,6 +110,7 @@ impl WorkerPython {
                 next_id: Cell::new(1),
                 progress,
                 output,
+                pictures,
             }),
         }
     }
@@ -184,8 +192,12 @@ impl PythonHost for WorkerPython {
             if let Some(message) = reply["error"].as_str() {
                 return Err(message.to_owned());
             }
-            serde_json::from_value(reply["outcome"].take())
-                .map_err(|error| format!("the Python worker's answer could not be read: {error}"))
+            let outcome: Outcome =
+                serde_json::from_value(reply["outcome"].take()).map_err(|error| {
+                    format!("the Python worker's answer could not be read: {error}")
+                })?;
+            (self.state.pictures)(outcome.pictures.clone());
+            Ok(outcome)
         })
     }
 

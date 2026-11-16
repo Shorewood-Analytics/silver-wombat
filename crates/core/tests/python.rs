@@ -8,7 +8,7 @@ use silver_wombat_core::fake::FakeGitHub;
 use silver_wombat_core::github::GitHub;
 use silver_wombat_core::http::LocalBoxFuture;
 use silver_wombat_core::python::{
-    Entry, Job, MAX_MOUNT_FILES, Outcome, PythonHost, PythonTool, RUNTIMES,
+    Entry, Job, MAX_MOUNT_FILES, Outcome, Picture, PythonHost, PythonTool, RUNTIMES,
 };
 use silver_wombat_core::shell::Shell;
 use silver_wombat_core::workspace::{ChangeKind, Workspace};
@@ -240,6 +240,11 @@ fn files_the_program_wrote_become_unsaved_changes() {
             ("README.md".to_owned(), None),
         ],
         binary: vec!["plot.png".to_owned()],
+        pictures: vec![Picture {
+            path: "plot.png".to_owned(),
+            kind: "image/png".to_owned(),
+            data: "iVBORw==".to_owned(),
+        }],
         ..Outcome::default()
     });
     let (text, code) = run(&sh, &ws, "python src/main.py");
@@ -248,6 +253,26 @@ fn files_the_program_wrote_become_unsaved_changes() {
     assert!(
         text.contains("not kept") && text.contains("plot.png"),
         "{text}"
+    );
+    assert!(
+        text.contains("pictures written: plot.png. The Show buttons"),
+        "{text}"
+    );
+    assert_eq!(
+        Picture {
+            data: "iVBORw==".to_owned(),
+            ..Picture::default()
+        }
+        .bytes(),
+        Some(vec![0x89, b'P', b'N', b'G'])
+    );
+    assert_eq!(
+        Picture {
+            data: "not base64!".to_owned(),
+            ..Picture::default()
+        }
+        .bytes(),
+        None
     );
     let changes: Vec<(String, ChangeKind)> = ws
         .changes()

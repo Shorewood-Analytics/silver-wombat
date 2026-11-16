@@ -50,6 +50,10 @@ pub enum Role {
     Status,
     /// The terminal's output: new output is announced as it arrives.
     Log,
+    /// A picture. Like [`Role::Secret`] this is a real, visible element: an
+    /// `<img>` laid over the space GPUI leaves for it, because the browser
+    /// already knows how to decode and scale every picture format.
+    Picture,
 }
 
 /// What happens when the element is activated.
@@ -119,6 +123,15 @@ pub fn mark_field(
     )
 }
 
+/// A picture shown from `address`, described to a screen reader by `label`.
+pub fn picture(
+    key: impl Into<String>,
+    label: impl Into<String>,
+    address: impl Into<String>,
+) -> impl IntoElement {
+    mark_with_value(key, Role::Picture, label, Some(address.into()), false, None)
+}
+
 fn mark_with_value(
     key: impl Into<String>,
     role: Role,
@@ -176,6 +189,7 @@ fn tag_for(role: Role) -> &'static str {
         Role::Button | Role::Tab { .. } => "button",
         Role::TextField { .. } | Role::Status | Role::Log => "div",
         Role::Secret => "input",
+        Role::Picture => "img",
         Role::Heading => "h1",
         Role::Section => "h2",
         Role::Text => "p",
@@ -220,6 +234,10 @@ fn apply(element: &web_sys::Element, node: &Written) {
             set(element, "autocapitalize", Some("off"));
             set(element, "spellcheck", Some("false"));
         }
+        Role::Picture => {
+            set(element, "src", node.value.as_deref());
+            set(element, "alt", Some(&node.label));
+        }
         Role::Status => set(element, "role", Some("status")),
         Role::Log => {
             set(element, "role", Some("log"));
@@ -233,7 +251,7 @@ fn apply(element: &web_sys::Element, node: &Written) {
     // typed in it; everything else is read from its label.
     let text = match node.role {
         Role::TextField { .. } => node.value.as_deref().unwrap_or(""),
-        Role::Secret => return,
+        Role::Secret | Role::Picture => return,
         _ => node.label.as_str(),
     };
     if element.text_content().as_deref() != Some(text) {

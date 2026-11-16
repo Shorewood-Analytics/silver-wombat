@@ -82,8 +82,9 @@ What to know:
 - `uv` itself is a native program and cannot run in a browser. The `uv` commands above are a small compatible subset built into the terminal. There is no virtual environment, so `uv add`, `uv sync` and `uv venv` say they are not supported.
 - The four interpreters are part of the site (about 13 MB each, downloaded the first time that version is used). Libraries are not: the first time a program imports one, Pyodide downloads it from `cdn.jsdelivr.net`. Pure-Python packages that Pyodide has not built are installed from PyPI. So the first use of a library needs a connection.
 - Not possible in a browser: sockets, subprocesses, threads, and packages with native code that Pyodide has not built.
-- A program gets the repository's text files, up to 400 files or 16 MB. Files that are not text are not given to it, and non-text files it writes (a plot saved as PNG, for example) are reported but not kept yet.
-- Output appears line by line while the program runs (when it goes to the terminal; into a pipe or a file it is handed over at the end). Stop ends a running program by discarding the interpreter, which also discards anything installed in the session.
+- A program gets the repository's text files, up to 400 files or 16 MB. Files that are not text are not given to it, and non-text files it writes are reported but not kept yet.
+- A picture the program writes (PNG, JPEG, GIF, WebP or SVG, up to 4 MB, up to six per run) gets a Show button under the terminal. Show opens it in place of the output, with Save to keep it on the device. So `plt.savefig("plot.png")` can be looked at. Pictures are not kept in the repository yet, and the next Python run replaces them.
+- Output appears while the program runs (when it goes to the terminal; into a pipe or a file it is handed over at the end). The terminal shows text only: colour codes are dropped, not drawn, and a line that redraws itself, such as a progress bar, stays one line. Stop ends a running program by discarding the interpreter, which also discards anything installed in the session.
 - There is no interactive prompt (`python` with no arguments).
 
 ## Accessibility

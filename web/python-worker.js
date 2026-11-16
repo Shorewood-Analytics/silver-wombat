@@ -360,6 +360,7 @@ async function run(pyodide, job, progress) {
   walk(FS, ROOT, present);
   const changed = [];
   const binary = [];
+  const pictures = [];
   const seen = new Set();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   for (const full of present) {
@@ -374,16 +375,36 @@ async function run(pyodide, job, progress) {
         text = null;
       }
     }
+    const isNew = text === null || given.get(path) !== text;
     if (text === null) {
       binary.push(path);
-    } else if (given.get(path) !== text) {
+    } else if (isNew) {
       changed.push([path, text]);
+    }
+    // A picture the program wrote (a plot, say) is handed over to be shown.
+    const type = PICTURE_TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()];
+    if (type && isNew && pictures.length < MAX_PICTURES && bytes.length <= MAX_PICTURE_BYTES) {
+      pictures.push({ path, type, data: base64(bytes) });
     }
   }
   for (const path of given.keys()) {
     if (!seen.has(path)) changed.push([path, null]);
   }
-  return { status, changed, binary };
+  return { status, changed, binary, pictures };
+}
+
+// Pictures a program writes are shown under the terminal: up to this many
+// from one run, each up to this size.
+const PICTURE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+const MAX_PICTURES = 6;
+const MAX_PICTURE_BYTES = 4 * 1024 * 1024;
+
+function base64(bytes) {
+  let text = "";
+  for (let at = 0; at < bytes.length; at += 0x8000) {
+    text += String.fromCharCode.apply(null, bytes.subarray(at, at + 0x8000));
+  }
+  return btoa(text);
 }
 
 self.onmessage = async (event) => {
