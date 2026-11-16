@@ -4,9 +4,13 @@
 //! browser. Objects get real git object ids, so "same content, same sha"
 //! holds exactly as it does on GitHub.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context, Poll};
 
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -701,6 +705,62 @@ fn repo_route(
             Ok(Value::Array(out))
         }
         _ => Err(not_found()),
+    }
+}
+
+/// A [`FakeGitHub`] that takes a moment to answer, as a real one does, and
+/// counts how many requests are waiting for an answer at the same time. For
+/// checking that work which could be done side by side is.
+pub struct SlowGitHub {
+    inner: Rc<FakeGitHub>,
+    waiting: Cell<usize>,
+    most_waiting: Cell<usize>,
+}
+
+impl SlowGitHub {
+    #[must_use]
+    pub fn new(inner: Rc<FakeGitHub>) -> Self {
+        Self {
+            inner,
+            waiting: Cell::new(0),
+            most_waiting: Cell::new(0),
+        }
+    }
+
+    /// The most requests that were waiting at once since the last call,
+    /// which starts the count again.
+    pub fn most_waiting(&self) -> usize {
+        self.most_waiting.replace(0)
+    }
+}
+
+/// Not ready the first time it is asked, ready the second.
+struct Moment(bool);
+
+impl Future for Moment {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        if self.0 {
+            return Poll::Ready(());
+        }
+        self.0 = true;
+        context.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+impl Http for SlowGitHub {
+    fn send(&self, request: Request) -> LocalBoxFuture<'_, Result<Response, String>> {
+        Box::pin(async move {
+            self.waiting.set(self.waiting.get() + 1);
+            self.most_waiting
+                .set(self.most_waiting.get().max(self.waiting.get()));
+            Moment(false).await;
+            let answer = self.inner.send(request).await;
+            self.waiting.set(self.waiting.get() - 1);
+            answer
+        })
     }
 }
 

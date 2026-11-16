@@ -15,10 +15,12 @@ use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::rc::Rc;
 
+use futures_util::stream::{self, StreamExt as _};
+
 use crate::error::Error;
 use crate::http::LocalBoxFuture;
 use crate::path;
-use crate::workspace::{ChangeKind, EntryKind, FileContent, Workspace};
+use crate::workspace::{ChangeKind, EntryKind, FETCH_AT_ONCE, FileContent, Workspace};
 
 /// The most text one command may print. More than this is cut, and the
 /// output says so.
@@ -945,11 +947,18 @@ impl Shell {
         } else {
             let over = files.len().saturating_sub(MAX_GREP_FILES);
             files.truncate(MAX_GREP_FILES);
-            for file in &files {
+            // Several files at a time, in the order they were named.
+            let mut reads = stream::iter(
+                files
+                    .iter()
+                    .map(|file| async move { (file, workspace.read(file).await) }),
+            )
+            .buffered(FETCH_AT_ONCE);
+            while let Some((file, content)) = reads.next().await {
                 if self.stop.get() {
                     break;
                 }
-                match workspace.read(file).await {
+                match content {
                     Ok(FileContent::Text(text)) => inputs.push((path::display(file), text)),
                     Ok(FileContent::Binary { .. }) => skipped += 1,
                     Err(error) => {

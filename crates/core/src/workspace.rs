@@ -23,6 +23,9 @@ use crate::{diff, path};
 pub const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 /// Fetched file contents kept in memory before the cache is emptied.
 const BLOB_CACHE_BYTES: usize = 16 * 1024 * 1024;
+/// How many files are fetched from GitHub at the same time when a command
+/// needs many. One after another, a few hundred files take a minute on a phone.
+pub const FETCH_AT_ONCE: usize = 8;
 /// Where checkpoints go: `autosave/<branch>`.
 pub const AUTOSAVE_PREFIX: &str = "autosave/";
 

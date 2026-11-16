@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::http::LocalBoxFuture;
 use crate::path;
 use crate::shell::{External, ExternalRun, Invocation};
-use crate::workspace::{FileContent, Workspace};
+use crate::workspace::{FETCH_AT_ONCE, FileContent, Workspace};
 
 /// A Python version the terminal can run, and the Pyodide release that
 /// provides it. Checked by loading each release on 2026-11-15.
@@ -81,8 +81,6 @@ pub const DEFAULT_RUNTIME: Runtime = RUNTIMES[2];
 pub const MAX_MOUNT_FILES: usize = 400;
 /// Most bytes handed to one Python run.
 pub const MAX_MOUNT_BYTES: usize = 16 * 1024 * 1024;
-/// How many files are fetched from GitHub at the same time for a run.
-pub const FETCH_AT_ONCE: usize = 8;
 /// From this many files on, fetching them is slow enough to be worth a note.
 const SLOW_MOUNT_FILES: usize = 30;
 

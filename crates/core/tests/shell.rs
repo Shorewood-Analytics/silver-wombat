@@ -3,10 +3,10 @@
 use std::rc::Rc;
 
 use futures::executor::block_on;
-use silver_wombat_core::fake::FakeGitHub;
+use silver_wombat_core::fake::{FakeGitHub, SlowGitHub};
 use silver_wombat_core::github::GitHub;
 use silver_wombat_core::shell::Shell;
-use silver_wombat_core::workspace::Workspace;
+use silver_wombat_core::workspace::{FETCH_AT_ONCE, Workspace};
 
 const REPO: &str = "t/r";
 
@@ -283,4 +283,30 @@ fn completion() {
     let done = block_on(sh.complete("c", &ws));
     assert_eq!(done.line, "c");
     assert_eq!(done.candidates, ["cat", "cd", "clear", "cp"]);
+}
+
+#[test]
+fn grep_reads_many_files_several_at_a_time_and_reports_in_order() {
+    let names: Vec<String> = (0..40).map(|i| format!("notes/n{i:02}.txt")).collect();
+    let texts: Vec<String> = (0..40)
+        .map(|i| format!("alpha {i}\nneedle {i}\n"))
+        .collect();
+    let files: Vec<(&str, &str)> = names
+        .iter()
+        .zip(&texts)
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
+    let fake = Rc::new(FakeGitHub::new("tester"));
+    fake.add_repo(REPO, "main", &files);
+    let slow = Rc::new(SlowGitHub::new(fake));
+    let ws = block_on(Workspace::open(GitHub::new(slow.clone()), REPO, "main")).unwrap();
+    let sh = Shell::new();
+
+    slow.most_waiting();
+    let output = block_on(sh.run("grep -r needle notes", &ws));
+    assert_eq!(slow.most_waiting(), FETCH_AT_ONCE);
+    let expected: Vec<String> = (0..40)
+        .map(|i| format!("/notes/n{i:02}.txt:needle {i}"))
+        .collect();
+    assert_eq!(output.text.lines().collect::<Vec<_>>(), expected);
 }

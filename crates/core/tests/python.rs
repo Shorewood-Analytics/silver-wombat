@@ -1,20 +1,17 @@
 //! `python`, `pip` and `uv` in the terminal, with a stand-in interpreter.
 
-use std::cell::{Cell, RefCell};
-use std::future::Future;
-use std::pin::Pin;
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::task::{Context, Poll};
 
 use futures::executor::block_on;
-use silver_wombat_core::fake::FakeGitHub;
+use silver_wombat_core::fake::{FakeGitHub, SlowGitHub};
 use silver_wombat_core::github::GitHub;
-use silver_wombat_core::http::{Http, LocalBoxFuture, Request, Response};
+use silver_wombat_core::http::LocalBoxFuture;
 use silver_wombat_core::python::{
-    Entry, FETCH_AT_ONCE, Job, MAX_MOUNT_FILES, Outcome, Picture, PythonHost, PythonTool, RUNTIMES,
+    Entry, Job, MAX_MOUNT_FILES, Outcome, Picture, PythonHost, PythonTool, RUNTIMES,
 };
 use silver_wombat_core::shell::Shell;
-use silver_wombat_core::workspace::{ChangeKind, Workspace};
+use silver_wombat_core::workspace::{ChangeKind, FETCH_AT_ONCE, Workspace};
 
 const REPO: &str = "t/r";
 
@@ -53,44 +50,6 @@ impl PythonHost for FakePython {
 
     fn note(&self, text: &str) {
         self.notes.borrow_mut().push(text.to_owned());
-    }
-}
-
-/// A GitHub that takes a moment to answer, and counts how many requests are
-/// waiting for an answer at the same time.
-struct SlowGitHub {
-    inner: Rc<FakeGitHub>,
-    waiting: Cell<usize>,
-    most_waiting: Cell<usize>,
-}
-
-/// Not ready the first time it is asked, ready the second.
-struct Moment(bool);
-
-impl Future for Moment {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-        if self.0 {
-            return Poll::Ready(());
-        }
-        self.0 = true;
-        context.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
-impl Http for SlowGitHub {
-    fn send(&self, request: Request) -> LocalBoxFuture<'_, Result<Response, String>> {
-        Box::pin(async move {
-            self.waiting.set(self.waiting.get() + 1);
-            self.most_waiting
-                .set(self.most_waiting.get().max(self.waiting.get()));
-            Moment(false).await;
-            let answer = self.inner.send(request).await;
-            self.waiting.set(self.waiting.get() - 1);
-            answer
-        })
     }
 }
 
@@ -506,19 +465,15 @@ fn the_files_are_fetched_several_at_a_time_and_stay_in_order() {
         .collect();
     let fake = Rc::new(FakeGitHub::new("tester"));
     fake.add_repo(REPO, "main", &files);
-    let slow = Rc::new(SlowGitHub {
-        inner: fake.clone(),
-        waiting: Cell::new(0),
-        most_waiting: Cell::new(0),
-    });
+    let slow = Rc::new(SlowGitHub::new(fake.clone()));
     let ws = block_on(Workspace::open(GitHub::new(slow.clone()), REPO, "main")).unwrap();
     let python = Rc::new(FakePython::default());
     let sh = Shell::new();
     sh.add_tool(Rc::new(PythonTool::new(python.clone())));
 
-    slow.most_waiting.set(0);
+    slow.most_waiting();
     run(&sh, &ws, "python -c 1");
-    assert_eq!(slow.most_waiting.get(), FETCH_AT_ONCE);
+    assert_eq!(slow.most_waiting(), FETCH_AT_ONCE);
     // What Python is given is every file, in the order of the listing, each
     // with its own text.
     let given = python.last().files;
