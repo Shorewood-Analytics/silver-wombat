@@ -13,6 +13,7 @@
 use std::fmt::Write as _;
 use std::rc::Rc;
 
+use futures_util::stream::{self, StreamExt as _};
 use serde::{Deserialize, Serialize};
 
 use crate::http::LocalBoxFuture;
@@ -80,6 +81,10 @@ pub const DEFAULT_RUNTIME: Runtime = RUNTIMES[2];
 pub const MAX_MOUNT_FILES: usize = 400;
 /// Most bytes handed to one Python run.
 pub const MAX_MOUNT_BYTES: usize = 16 * 1024 * 1024;
+/// How many files are fetched from GitHub at the same time for a run.
+pub const FETCH_AT_ONCE: usize = 8;
+/// From this many files on, fetching them is slow enough to be worth a note.
+const SLOW_MOUNT_FILES: usize = 30;
 
 /// What to execute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +173,9 @@ pub trait PythonHost {
     /// Ends the running program, if there is one. Its `run` then finishes
     /// with status 130. The default does nothing.
     fn stop(&self) {}
+
+    /// Shows a short note at once, before a wait. The default shows nothing.
+    fn note(&self, _text: &str) {}
 }
 
 /// The runtime for a `major.minor[.patch]` string such as `3.13` or `3.13.2`.
@@ -361,30 +369,49 @@ impl PythonTool {
     /// The repository's text files for the program, a note to print before
     /// it runs, and how many files were held back for not being text.
     async fn mount(
+        &self,
         workspace: &Workspace,
     ) -> Result<(Vec<(String, String)>, String, usize), String> {
         let listed = workspace
             .files_under("")
             .await
             .map_err(|error| error.to_string())?;
+        let total = listed.len();
+        // The first run in a repository has to fetch every file. Say so
+        // before the wait, not after it.
+        let to_fetch = total.min(MAX_MOUNT_FILES);
+        if to_fetch >= SLOW_MOUNT_FILES && workspace.files_in_memory() < to_fetch / 2 {
+            self.host.note(&format!(
+                "Getting the repository's files for Python ({to_fetch} files). This is needed once."
+            ));
+        }
+        // Several at a time: one after another, a few hundred files would
+        // take a minute on a phone. The order of the results is the order
+        // of the list.
+        let mut reads = stream::iter(listed.into_iter().map(|file| async move {
+            let content = workspace.read(&file.path).await;
+            (file.path, content)
+        }))
+        .buffered(FETCH_AT_ONCE);
         let mut files = Vec::new();
         let mut bytes = 0usize;
         let mut skipped = 0usize;
-        let mut left_out = 0usize;
-        for file in listed {
-            if files.len() >= MAX_MOUNT_FILES || bytes >= MAX_MOUNT_BYTES {
-                left_out += 1;
-                continue;
-            }
-            match workspace.read(&file.path).await {
+        let mut seen = 0usize;
+        while files.len() < MAX_MOUNT_FILES && bytes < MAX_MOUNT_BYTES {
+            let Some((file, content)) = reads.next().await else {
+                break;
+            };
+            seen += 1;
+            match content {
                 Ok(FileContent::Text(text)) => {
                     bytes += text.len();
-                    files.push((file.path, text));
+                    files.push((file, text));
                 }
                 Ok(FileContent::Binary { .. }) => skipped += 1,
-                Err(error) => return Err(format!("{}: {error}", path::display(&file.path))),
+                Err(error) => return Err(format!("{}: {error}", path::display(&file))),
             }
         }
+        let left_out = total - seen;
         let mut note = String::new();
         if left_out > 0 {
             let _ = writeln!(
@@ -406,7 +433,7 @@ impl PythonTool {
         args: &[String],
     ) -> ExternalRun {
         let workspace = call.workspace;
-        let (files, note, skipped) = match Self::mount(workspace).await {
+        let (files, note, skipped) = match self.mount(workspace).await {
             Ok(mounted) => mounted,
             Err(message) => return ExternalRun::fail(1, format!("python: {message}")),
         };

@@ -201,6 +201,10 @@ impl PythonHost for WorkerPython {
         })
     }
 
+    fn note(&self, text: &str) {
+        (self.state.progress)(text);
+    }
+
     fn stop(&self) {
         let Some(id) = self.state.pending_id() else {
             return;

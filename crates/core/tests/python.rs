@@ -1,14 +1,17 @@
 //! `python`, `pip` and `uv` in the terminal, with a stand-in interpreter.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use silver_wombat_core::fake::FakeGitHub;
 use silver_wombat_core::github::GitHub;
-use silver_wombat_core::http::LocalBoxFuture;
+use silver_wombat_core::http::{Http, LocalBoxFuture, Request, Response};
 use silver_wombat_core::python::{
-    Entry, Job, MAX_MOUNT_FILES, Outcome, Picture, PythonHost, PythonTool, RUNTIMES,
+    Entry, FETCH_AT_ONCE, Job, MAX_MOUNT_FILES, Outcome, Picture, PythonHost, PythonTool, RUNTIMES,
 };
 use silver_wombat_core::shell::Shell;
 use silver_wombat_core::workspace::{ChangeKind, Workspace};
@@ -20,6 +23,7 @@ const REPO: &str = "t/r";
 struct FakePython {
     jobs: RefCell<Vec<Job>>,
     answer: RefCell<Option<Result<Outcome, String>>>,
+    notes: RefCell<Vec<String>>,
 }
 
 impl FakePython {
@@ -45,6 +49,48 @@ impl PythonHost for FakePython {
             .take()
             .unwrap_or_else(|| Ok(Outcome::default()));
         Box::pin(async move { answer })
+    }
+
+    fn note(&self, text: &str) {
+        self.notes.borrow_mut().push(text.to_owned());
+    }
+}
+
+/// A GitHub that takes a moment to answer, and counts how many requests are
+/// waiting for an answer at the same time.
+struct SlowGitHub {
+    inner: Rc<FakeGitHub>,
+    waiting: Cell<usize>,
+    most_waiting: Cell<usize>,
+}
+
+/// Not ready the first time it is asked, ready the second.
+struct Moment(bool);
+
+impl Future for Moment {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        if self.0 {
+            return Poll::Ready(());
+        }
+        self.0 = true;
+        context.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+impl Http for SlowGitHub {
+    fn send(&self, request: Request) -> LocalBoxFuture<'_, Result<Response, String>> {
+        Box::pin(async move {
+            self.waiting.set(self.waiting.get() + 1);
+            self.most_waiting
+                .set(self.most_waiting.get().max(self.waiting.get()));
+            Moment(false).await;
+            let answer = self.inner.send(request).await;
+            self.waiting.set(self.waiting.get() - 1);
+            answer
+        })
     }
 }
 
@@ -444,6 +490,64 @@ fn files_that_are_not_text_are_held_back_and_mentioned_only_on_failure() {
     );
     assert_eq!(*block_on(ws.read_bytes("main.py")).unwrap(), *b"print(1)\n");
     assert!(block_on(ws.read_bytes("data")).is_err());
+}
+
+#[test]
+fn the_files_are_fetched_several_at_a_time_and_stay_in_order() {
+    // Ten folders, three levels down, five files in each.
+    let names: Vec<String> = (0..50)
+        .map(|i| format!("src/part{:02}/deep/f{i:02}.py", i / 5))
+        .collect();
+    let texts: Vec<String> = (0..50).map(|i| format!("print({i})\n")).collect();
+    let files: Vec<(&str, &str)> = names
+        .iter()
+        .zip(&texts)
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
+    let fake = Rc::new(FakeGitHub::new("tester"));
+    fake.add_repo(REPO, "main", &files);
+    let slow = Rc::new(SlowGitHub {
+        inner: fake.clone(),
+        waiting: Cell::new(0),
+        most_waiting: Cell::new(0),
+    });
+    let ws = block_on(Workspace::open(GitHub::new(slow.clone()), REPO, "main")).unwrap();
+    let python = Rc::new(FakePython::default());
+    let sh = Shell::new();
+    sh.add_tool(Rc::new(PythonTool::new(python.clone())));
+
+    slow.most_waiting.set(0);
+    run(&sh, &ws, "python -c 1");
+    assert_eq!(slow.most_waiting.get(), FETCH_AT_ONCE);
+    // What Python is given is every file, in the order of the listing, each
+    // with its own text.
+    let given = python.last().files;
+    let expected: Vec<(String, String)> =
+        names.iter().cloned().zip(texts.iter().cloned()).collect();
+    assert_eq!(given, expected);
+    // The wait was announced before it began, and only the first time.
+    assert_eq!(
+        *python.notes.borrow(),
+        ["Getting the repository's files for Python (50 files). This is needed once."]
+    );
+    let fetched = |fake: &FakeGitHub| {
+        fake.requests()
+            .iter()
+            .filter(|request| request.contains("/git/blobs/"))
+            .count()
+    };
+    assert_eq!(fetched(&fake), 50);
+    // The folders came with the one listing of everything: none of the 21
+    // (src, ten parts, ten "deep") was asked for by itself.
+    let folders_asked: Vec<String> = fake
+        .requests()
+        .into_iter()
+        .filter(|request| request.contains("/git/trees/") && !request.contains("recursive=1"))
+        .collect();
+    assert!(folders_asked.len() <= 1, "{folders_asked:?}");
+    run(&sh, &ws, "python -c 1");
+    assert_eq!(fetched(&fake), 50, "the second run fetches no file again");
+    assert_eq!(python.notes.borrow().len(), 1);
 }
 
 #[test]

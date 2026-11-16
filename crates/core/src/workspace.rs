@@ -234,6 +234,12 @@ impl Workspace {
         self.state.borrow().head.clone()
     }
 
+    /// How many files' contents are held in memory, fetched earlier.
+    #[must_use]
+    pub fn files_in_memory(&self) -> usize {
+        self.state.borrow().blobs.len()
+    }
+
     /// The GitHub client this workspace uses.
     #[must_use]
     pub fn github(&self) -> &GitHub {
@@ -256,6 +262,36 @@ impl Workspace {
             .trees
             .insert(sha.to_owned(), tree.clone());
         Ok(tree)
+    }
+
+    /// Keeps what a listing of everything under the folder `top` says about
+    /// each folder inside it, so that reaching a file deep in the repository
+    /// afterwards does not ask GitHub for every folder on the way.
+    /// `listing` has paths relative to `top`, as GitHub returns them.
+    fn remember_folders(&self, top: &str, listing: &[TreeEntry]) {
+        let mut folders: HashMap<&str, Vec<TreeEntry>> = HashMap::new();
+        for entry in listing {
+            let (folder, name) = entry.path.rsplit_once('/').unwrap_or(("", &entry.path));
+            folders.entry(folder).or_default().push(TreeEntry {
+                path: name.to_owned(),
+                ..entry.clone()
+            });
+        }
+        let mut state = self.state.borrow_mut();
+        for entry in listing.iter().filter(|entry| entry.kind == "tree") {
+            if let Some(children) = folders.remove(entry.path.as_str()) {
+                state
+                    .trees
+                    .entry(entry.sha.clone())
+                    .or_insert_with(|| Rc::new(children));
+            }
+        }
+        if let Some(children) = folders.remove("") {
+            state
+                .trees
+                .entry(top.to_owned())
+                .or_insert_with(|| Rc::new(children));
+        }
     }
 
     async fn blob(&self, sha: &str) -> Result<Rc<Vec<u8>>> {
@@ -619,6 +655,7 @@ impl Workspace {
                     path::display(dir)
                 )));
             }
+            self.remember_folders(&sha, &tree.tree);
             for entry in tree.tree {
                 if matches!(kind_of(&entry), EntryKind::File | EntryKind::Symlink) {
                     files.insert(path::join(dir, &entry.path), entry.size);
