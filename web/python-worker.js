@@ -11,6 +11,8 @@
 // each one from its own CDN folder the first time a program imports it.
 
 const CDN = "https://cdn.jsdelivr.net/pyodide/";
+// How many times a library download is tried before it is given up on.
+const DOWNLOAD_TRIES = 3;
 const ROOT = "/repo";
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -336,11 +338,23 @@ async function run(pyodide, job, progress) {
       say(message);
     },
   };
+  // A download can fail part-way, on a phone's connection or at the CDN. Try
+  // again before giving up: what did arrive is kept, so only what is missing
+  // is fetched. With no connection at all there is nothing to wait for.
+  const downloading = async (load) => {
+    for (let attempt = 1; ; attempt += 1) {
+      downloadFailed = false;
+      await load();
+      if (!downloadFailed || attempt === DOWNLOAD_TRIES || self.navigator?.onLine === false) return;
+      say(`A download failed. Trying again (${attempt + 1} of ${DOWNLOAD_TRIES}).`);
+      await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+    }
+  };
   let status = 0;
   try {
     if (job.install.length > 0) {
       progress(`Installing ${job.install.join(", ")}`);
-      await pyodide.loadPackage("micropip", libraries);
+      await downloading(() => pyodide.loadPackage("micropip", libraries));
       if (!("micropip" in pyodide.loadedPackages)) {
         throw new Error("the installer (micropip) could not be downloaded");
       }
@@ -364,7 +378,8 @@ async function run(pyodide, job, progress) {
       wanted.destroy();
       findImports.destroy();
       if (names.length > 0) {
-        await pyodide.loadPackagesFromImports(names.map((name) => `import ${name}`).join("\n"), libraries);
+        const imports = names.map((name) => `import ${name}`).join("\n");
+        await downloading(() => pyodide.loadPackagesFromImports(imports, libraries));
       }
     }
   } catch (error) {

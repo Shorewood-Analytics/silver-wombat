@@ -372,7 +372,7 @@ try {
   check(apart(replaceYesAt, allAt) && replaceKeepAt.x < replaceYesAt.x, "the yes is not where Replace all was, and Keep comes before it");
   await scan("being asked whether to replace all");
   await press("Keep as it is");
-  check((await counted("1 of 1")) && (await button("Replace all 1 place").count()) === 1, "Keep goes back, and nothing is replaced");
+  check((await counted("1 of 1")) && (await eventually(async () => (await button("Replace all 1 place").count()) === 1)), "Keep goes back, and nothing is replaced");
   await press("Replace all 1 place");
   await press("Yes, replace in 1 place");
   check((await counted("Replaced 1 place. Undo takes that back.")) && (await counted("Not found")), "after the yes every place is replaced, and how many is said");
@@ -509,12 +509,26 @@ try {
   await runLine("echo still here");
   check(await says("still here"), "the terminal works after the stop");
   if (online) {
+    // The CDN sometimes fails a large download from a CI machine. The app
+    // tries each download three times itself; if it still gives up, the
+    // command is run again here, as a person would, and that is logged. The
+    // check stays the same: the library has to arrive and be imported.
+    const downloads = async (line, done, timeout) => {
+      for (let attempt = 1; ; attempt += 1) {
+        await runLine("clear");
+        await runLine(line);
+        const gaveUp = "A library could not be downloaded";
+        await eventually(async () => (await heard("log")).some((text) => text.includes(done) || text.includes(gaveUp)), timeout);
+        if ((await heard("log")).some((text) => text.includes(done))) return true;
+        if (attempt === 3) return false;
+        console.log(`     (the CDN failed a download; running the command again, attempt ${attempt + 1} of 3)`);
+        await settle(5000);
+      }
+    };
     for (const [version, numpy] of [["3.15", "2.4.3"], ["3.12", "2.0.2"], ["3.14", "2.4.6"]]) {
-      await runLine(`uv python pin ${version} && python -c "import numpy; print('numpy', numpy.__version__)"`);
-      check(await says(`numpy ${numpy}`, 180_000), `Python ${version} downloads numpy from the CDN on import (numpy ${numpy})`);
+      check(await downloads(`uv python pin ${version} && python -c "import numpy; print('numpy', numpy.__version__)"`, `numpy ${numpy}`, 180_000), `Python ${version} downloads numpy from the CDN on import (numpy ${numpy})`);
     }
-    await runLine(`uv python pin 3.14 && python -c "import matplotlib.pyplot as plt; plt.plot([1, 4, 9]); plt.savefig('plot.png'); plt.show(); print('plot', 'saved')"`);
-    check((await says("plot saved", 240_000)) && (await eventually(async () => (await button("Show plot.png").count()) === 1)), "matplotlib downloads from the CDN and saves a plot");
+    check((await downloads(`uv python pin 3.14 && python -c "import matplotlib.pyplot as plt; plt.plot([1, 4, 9]); plt.savefig('plot.png'); plt.show(); print('plot', 'saved')"`, "plot saved", 240_000)) && (await eventually(async () => (await button("Show plot.png").count()) === 1)), "matplotlib downloads from the CDN and saves a plot");
     check((await button("Show figure-1.png").count()) === 1, "plt.show() hands its figure over as a picture too");
     await press("Show figure-1.png");
     const plot = layer.locator("img");
