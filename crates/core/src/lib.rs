@@ -20,7 +20,7 @@ pub mod path;
 pub mod python;
 pub mod screen;
 pub mod shell;
-
+pub mod term;
 pub mod workspace;
 
 pub use error::Error;

@@ -28,15 +28,27 @@ let outputCut = false;
 // what has been written but not sent yet.
 let live = null;
 let unsent = "";
-let lastSent = 0;
 let liveDecoder = null;
+// Not every write is sent at once: a program printing in a loop would flood
+// the page. A few pieces may go straight away, so lines printed together are
+// not held back; after that, one piece every 50 ms.
+const BURST = 8;
+const REFILL_MS = 50;
+let allowance = BURST;
+let refilled = 0;
 
 function sendOutput(force) {
-  // Not on every write: a program printing in a loop would flood the page.
-  if (live === null || unsent === "" || (!force && Date.now() - lastSent < 50)) return;
+  if (live === null || unsent === "") return;
+  const now = Date.now();
+  const earned = Math.floor((now - refilled) / REFILL_MS);
+  if (earned > 0) {
+    allowance = Math.min(BURST, allowance + earned);
+    refilled = allowance === BURST ? now : refilled + earned * REFILL_MS;
+  }
+  if (allowance === 0 && !force) return;
+  allowance = Math.max(0, allowance - 1);
   live(unsent);
   unsent = "";
-  lastSent = Date.now();
 }
 
 function collect(buffer) {
@@ -76,6 +88,7 @@ async function start(job, progress) {
   pyodide.setStdout({ write: collect, isatty: false });
   pyodide.setStderr({ write: collect, isatty: false });
   pyodide.FS.mkdirTree(ROOT);
+  pyodide.globals.set("_silver_wombat_send", () => sendOutput(true));
   pyodide.runPython(DRIVER, { filename: HERE });
   return pyodide;
 }
@@ -84,7 +97,23 @@ async function start(job, progress) {
 // `python` command would, and tidies up so the next run starts clean.
 const DRIVER = `
 def _silver_wombat():
-    import ast, os, runpy, sys, traceback
+    import ast, os, runpy, sys, time, traceback
+
+    # A program that prints and then waits should show what it printed
+    # before the wait, not after it.
+    send = _silver_wombat_send
+    wait = time.sleep
+
+    def sleep(seconds):
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        send()
+        wait(seconds)
+
+    time.sleep = sleep
 
     ROOT = "${ROOT}"
     HERE = "${HERE}"
@@ -364,7 +393,8 @@ self.onmessage = async (event) => {
   outputBytes = 0;
   outputCut = false;
   unsent = "";
-  lastSent = 0;
+  allowance = BURST;
+  refilled = Date.now();
   liveDecoder = new TextDecoder("utf-8");
   live = job.stream ? (text) => self.postMessage(JSON.stringify({ id, output: text })) : null;
   try {

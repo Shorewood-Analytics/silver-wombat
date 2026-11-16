@@ -121,8 +121,10 @@ async function launch(args, settings = {}) {
   page = await context.newPage();
   layer = page.locator("#a11y");
   page.on("console", (message) => {
-    // A library download that fails is reported in the terminal and tested there.
-    if (message.type() === "error" && !message.location().url.startsWith(CDN)) errors.push(message.text().slice(0, 300));
+    // A library download that fails is reported in the terminal and tested
+    // there. So is GitHub's refusal of the made-up token.
+    const from = message.location().url;
+    if (message.type() === "error" && !from.startsWith(CDN) && !from.startsWith("https://api.github.com/")) errors.push(message.text().slice(0, 300));
   });
   page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 300)}`));
 }
@@ -365,6 +367,16 @@ try {
   await runLine(`python -c "import time; print(1111 * 3); time.sleep(5); print(2222 * 4)"`);
   check((await says("3333", 30_000)) && (await heard("log")).every((text) => !text.includes("8888")), "what a program prints shows while it is still running");
   check(await says("8888", 30_000), "and the rest when it gets there");
+  await runLine(`python -c "import time; [print(n * 1001) for n in range(1, 13)]; time.sleep(4); print(7 * 1111)"`);
+  check((await says("12012", 3_000)) && (await heard("log")).every((text) => !text.includes("7777")), "a burst of lines is all shown before the program's next wait, not after it");
+  await says("7777", 30_000);
+  // What a terminal does with the codes programs print: colour codes are
+  // not text, and a carriage return starts the same line again.
+  await runLine("clear");
+  await runLine(`python -c "print(chr(27) + '[31mred text' + chr(27) + '[0m here')"`);
+  check((await eventually(async () => (await heard("log")).some((text) => /^red text here$/m.test(text)), 30_000)) && (await heard("log")).every((text) => !text.includes("\u001b")), "colour codes in a program's output are not shown as text");
+  await runLine(`python -c "import sys, time; [(sys.stderr.write(chr(13) + 'step %d of 3' % n), sys.stderr.flush(), time.sleep(0.4)) for n in (1, 2, 3)]; print(chr(13) + 'finished %d steps' % 3)"`);
+  check((await says("finished 3 steps", 30_000)) && (await heard("log")).every((text) => !text.includes("step 1 of 3") && !text.includes("step 3 of 3")), "a progress line that redraws itself stays one line");
   // Typing the next command while the last one is still running.
   await runLine(`python -c "import time; time.sleep(3); print(3030 * 3)"`);
   await field("Command").dispatchEvent("click");

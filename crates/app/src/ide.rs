@@ -26,7 +26,7 @@ use silver_wombat_core::workspace::MAX_TEXT_BYTES;
 use silver_wombat_core::workspace::{
     Change, ChangeKind, DirEntry, EntryKind, FileContent, SaveState, Workspace,
 };
-use silver_wombat_core::{palette, path};
+use silver_wombat_core::{palette, path, term};
 
 use crate::mirror::{self, Action, Role};
 use crate::platform::{self, FetchHttp, Kept};
@@ -226,7 +226,7 @@ struct Work {
     dir: String,
     entries: Vec<DirEntry>,
     open: Option<String>,
-    terminal_text: String,
+    terminal_text: term::Display,
     history_at: Option<usize>,
     diff_of: Option<String>,
     /// Changed files that have also changed on GitHub, found when a commit
@@ -737,7 +737,7 @@ impl Ide {
                         dir: String::new(),
                         entries,
                         open: None,
-                        terminal_text: String::new(),
+                        terminal_text: term::Display::new(),
                         history_at: None,
                         diff_of: None,
                         conflicts: Vec::new(),
@@ -986,19 +986,9 @@ impl Ide {
 
     fn print(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(work) = &mut self.work else { return };
-        work.terminal_text.push_str(text);
-        if work.terminal_text.len() > TERMINAL_KEEP_BYTES {
-            let mut cut = work.terminal_text.len() - TERMINAL_KEEP_BYTES;
-            while !work.terminal_text.is_char_boundary(cut) {
-                cut += 1;
-            }
-            // Drop whole lines from the top so the first line is never half a line.
-            if let Some(newline) = work.terminal_text[cut..].find('\n') {
-                cut += newline + 1;
-            }
-            work.terminal_text.drain(..cut);
-        }
-        let shown = work.terminal_text.clone();
+        work.terminal_text.push(text);
+        work.terminal_text.keep_last(TERMINAL_KEEP_BYTES);
+        let shown = work.terminal_text.text();
         // Moving the output's cursor to the end scrolls it there, but it also
         // takes the keyboard's focus. Give that back: someone typing the next
         // command while the last one prints must not lose their keys, and
@@ -2596,7 +2586,7 @@ impl Ide {
         };
         // What a screen reader hears: the most recent output, not the whole scrollback.
         let recent = match &self.work {
-            Some(work) => tail(&work.terminal_text, 3000).to_owned(),
+            Some(work) => tail(&work.terminal_text.text(), 3000).to_owned(),
             None => String::new(),
         };
         v_flex()
