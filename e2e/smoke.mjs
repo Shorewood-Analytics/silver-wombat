@@ -267,6 +267,23 @@ try {
     await runLine(`uv python pin ${version} && python -c "import sys; print('runs', sys.version.split()[0])"`);
     check(await says(`runs ${exact}`), `after uv python pin ${version}, Python ${version} runs (${exact})`);
   }
+  await runLine("clear");
+  // The numbers are worked out by the program, so that the command line
+  // echoed in the terminal does not contain what is being looked for.
+  await runLine(`python -c "import time; print(1111 * 3); time.sleep(5); print(2222 * 4)"`);
+  check((await says("3333", 30_000)) && (await heard("log")).every((text) => !text.includes("8888")), "what a program prints shows while it is still running");
+  check(await says("8888", 30_000), "and the rest when it gets there");
+  // Typing the next command while the last one is still running.
+  await runLine(`python -c "import time; time.sleep(3); print(3030 * 3)"`);
+  await field("Command").dispatchEvent("click");
+  await settle(300);
+  const typedAhead = "echo typed while the last command was running";
+  await page.keyboard.type(typedAhead, { delay: 110 });
+  await says("9090", 30_000);
+  await settle(500);
+  check((await field("Command").textContent()) === typedAhead, "keys typed while a command runs are not lost when it finishes and prints");
+  await press("Run");
+  check(await says("typed while the last command was running\n", 15_000) || (await heard("log")).some((text) => text.split("typed while the last command was running").length >= 3), "and the command typed ahead runs");
   await runLine("python -c 'while True: pass'");
   await settle(2000);
   await press("Stop");

@@ -188,6 +188,23 @@ fn code_modules_and_piped_input() {
 }
 
 #[test]
+fn output_is_streamed_only_when_it_goes_straight_to_a_terminal_that_can_show_it() {
+    let (python, ws, sh) = setup();
+    run(&sh, &ws, "python src/main.py");
+    assert!(!python.last().stream, "this terminal has not said it can");
+    sh.set_live_output(true);
+    run(&sh, &ws, "python src/main.py");
+    assert!(python.last().stream);
+    run(&sh, &ws, "echo first && python src/main.py");
+    assert!(python.last().stream);
+    // Into a pipe or a file, the output has to come back whole.
+    run(&sh, &ws, "python src/main.py | wc -l");
+    assert!(!python.last().stream);
+    run(&sh, &ws, "python src/main.py > out.txt");
+    assert!(!python.last().stream);
+}
+
+#[test]
 fn the_exit_status_and_error_text_come_back() {
     let (python, ws, sh) = setup();
     python.answer(Outcome {

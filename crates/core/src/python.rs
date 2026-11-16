@@ -114,12 +114,17 @@ pub struct Job {
     pub args: Vec<String>,
     /// Text for the program to read from standard input.
     pub stdin: Option<String>,
+    /// Hand over output as it is produced, for a terminal to show while the
+    /// program runs, instead of all at once in [`Outcome::output`].
+    #[serde(default)]
+    pub stream: bool,
 }
 
 /// What the interpreter reported back.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Outcome {
     /// Standard output and standard error, in the order they were written.
+    /// Empty if the job asked for it to be streamed instead.
     pub output: String,
     /// The process exit status.
     pub status: i32,
@@ -391,6 +396,7 @@ impl PythonTool {
             entry,
             args: args.to_vec(),
             stdin: call.stdin.map(str::to_owned),
+            stream: call.live,
         };
         let outcome = match self.host.run(job).await {
             Ok(outcome) => outcome,

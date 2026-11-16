@@ -3,7 +3,8 @@
 // worker to change version or to stop a running program.
 //
 // Messages in:  JSON text {id, job}; the job is `Job` in crates/core/src/python.rs.
-// Messages out: JSON text {id, progress}, then {id, outcome} or {id, error}.
+// Messages out: JSON text {id, progress} and, if the job asks for its output
+// as it is produced, {id, output}; then {id, outcome} or {id, error}.
 //
 // The interpreter itself is served by this site from python/<version>/.
 // Libraries (numpy and the rest) are not part of the site: Pyodide downloads
@@ -23,9 +24,29 @@ let chunks = [];
 let outputBytes = 0;
 let outputCut = false;
 
+// When a job asks for its output as it is produced: where to send it, and
+// what has been written but not sent yet.
+let live = null;
+let unsent = "";
+let lastSent = 0;
+let liveDecoder = null;
+
+function sendOutput(force) {
+  // Not on every write: a program printing in a loop would flood the page.
+  if (live === null || unsent === "" || (!force && Date.now() - lastSent < 50)) return;
+  live(unsent);
+  unsent = "";
+  lastSent = Date.now();
+}
+
 function collect(buffer) {
   if (outputBytes < MAX_OUTPUT_BYTES) {
-    chunks.push(buffer.slice());
+    if (live !== null) {
+      unsent += liveDecoder.decode(buffer, { stream: true });
+      sendOutput(false);
+    } else {
+      chunks.push(buffer.slice());
+    }
   } else {
     outputCut = true;
   }
@@ -67,6 +88,15 @@ def _silver_wombat():
 
     ROOT = "${ROOT}"
     HERE = "${HERE}"
+
+    # Hand each line over as it is printed, so a terminal can show output
+    # while the program runs, without claiming to be a terminal (which would
+    # make some libraries print colour codes).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass
 
     def local_module(name, folders):
         parts = name.split(".")
@@ -333,6 +363,10 @@ self.onmessage = async (event) => {
   chunks = [];
   outputBytes = 0;
   outputCut = false;
+  unsent = "";
+  lastSent = 0;
+  liveDecoder = new TextDecoder("utf-8");
+  live = job.stream ? (text) => self.postMessage(JSON.stringify({ id, output: text })) : null;
   try {
     if (loadedPython !== null && loadedPython !== job.python) {
       throw new Error(`this worker holds Python ${loadedPython}; a new one is needed for ${job.python}`);
@@ -358,10 +392,16 @@ self.onmessage = async (event) => {
     }
     let output = new TextDecoder("utf-8").decode(pieces);
     if (outputCut) {
-      output += `\n[output cut: ${outputBytes - at} more bytes not shown]\n`;
+      const cut = `\n[output cut: ${outputBytes - MAX_OUTPUT_BYTES} or more bytes not shown]\n`;
+      if (live !== null) unsent += cut;
+      else output += cut;
     }
+    sendOutput(true);
     self.postMessage(JSON.stringify({ id, outcome: { output, ...result } }));
   } catch (error) {
+    sendOutput(true);
     self.postMessage(JSON.stringify({ id, error: String(error?.message ?? error) }));
+  } finally {
+    live = null;
   }
 };

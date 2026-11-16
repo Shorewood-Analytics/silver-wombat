@@ -31,6 +31,7 @@ struct State {
     pending: RefCell<Option<(u32, js_sys::Function)>>,
     next_id: Cell<u32>,
     progress: Rc<dyn Fn(&str)>,
+    output: Rc<dyn Fn(&str)>,
 }
 
 impl State {
@@ -67,6 +68,8 @@ impl State {
         }
         if let Some(note) = reply["progress"].as_str() {
             (self.progress)(note);
+        } else if let Some(text) = reply["output"].as_str() {
+            (self.output)(text);
         } else {
             self.settle(id, text);
         }
@@ -90,14 +93,16 @@ pub struct WorkerPython {
 
 impl WorkerPython {
     /// `progress` receives short notes while Python starts and loads
-    /// libraries, for showing in the terminal.
-    pub fn new(progress: Rc<dyn Fn(&str)>) -> Self {
+    /// libraries, and `output` what a program prints while it runs (for a
+    /// job that asked for that): both for showing in the terminal.
+    pub fn new(progress: Rc<dyn Fn(&str)>, output: Rc<dyn Fn(&str)>) -> Self {
         Self {
             state: Rc::new(State {
                 running: RefCell::new(None),
                 pending: RefCell::new(None),
                 next_id: Cell::new(1),
                 progress,
+                output,
             }),
         }
     }

@@ -952,18 +952,22 @@ impl Ide {
     fn new_shell(window: &mut Window, cx: &mut Context<Self>) -> Rc<Shell> {
         let ide = cx.entity().downgrade();
         let handle = window.window_handle();
-        let progress = Rc::new(move |note: &str| {
-            let line = format!("{note}\n");
+        let print = Rc::new(move |text: String| {
             let ide = ide.clone();
             crate::with_app(|cx| {
                 let _ = handle.update(cx, |_, window, cx| {
-                    let _ = ide.update(cx, |this, cx| this.print(&line, window, cx));
+                    let _ = ide.update(cx, |this, cx| this.print(&text, window, cx));
                 });
             });
         });
+        let note = print.clone();
+        let progress = Rc::new(move |text: &str| note(format!("{text}\n")));
+        // What a program prints is shown as it is printed.
+        let output = Rc::new(move |text: &str| print(text.to_owned()));
         let shell = Shell::new();
+        shell.set_live_output(true);
         shell.add_tool(Rc::new(PythonTool::new(Rc::new(WorkerPython::new(
-            progress,
+            progress, output,
         )))));
         Rc::new(shell)
     }
@@ -983,11 +987,20 @@ impl Ide {
             work.terminal_text.drain(..cut);
         }
         let shown = work.terminal_text.clone();
+        // Moving the output's cursor to the end scrolls it there, but it also
+        // takes the keyboard's focus. Give that back: someone typing the next
+        // command while the last one prints must not lose their keys, and
+        // output arriving must not take Tab away from the page.
+        let focused = window.focused(cx);
         self.terminal.update(cx, |terminal, cx| {
             terminal.set_value(shown, window, cx);
             let end = terminal.text().len();
             terminal.set_cursor_position(terminal.text().offset_to_position(end), window, cx);
         });
+        match focused {
+            Some(handle) => window.focus(&handle, cx),
+            None => window.blur(cx),
+        }
         cx.notify();
     }
 

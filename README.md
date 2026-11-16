@@ -79,7 +79,7 @@ What to know:
 - The four interpreters are part of the site (about 13 MB each, downloaded the first time that version is used). Libraries are not: the first time a program imports one, Pyodide downloads it from `cdn.jsdelivr.net`. Pure-Python packages that Pyodide has not built are installed from PyPI. So the first use of a library needs a connection.
 - Not possible in a browser: sockets, subprocesses, threads, and packages with native code that Pyodide has not built.
 - A program gets the repository's text files, up to 400 files or 16 MB. Files that are not text are not given to it, and non-text files it writes (a plot saved as PNG, for example) are reported but not kept yet.
-- Output appears when the program ends, not while it runs. Stop ends a running program by discarding the interpreter, which also discards anything installed in the session.
+- Output appears line by line while the program runs (when it goes to the terminal; into a pipe or a file it is handed over at the end). Stop ends a running program by discarding the interpreter, which also discards anything installed in the session.
 - There is no interactive prompt (`python` with no arguments).
 
 ## Accessibility

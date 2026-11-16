@@ -72,6 +72,10 @@ pub struct Invocation<'a> {
     /// The shell's current folder, relative to the repository root.
     pub cwd: &'a str,
     pub workspace: &'a Workspace,
+    /// The program's output is going straight to a terminal that can show it
+    /// while the program runs (see [`Shell::set_live_output`]). A program
+    /// that shows its output that way itself returns none of it.
+    pub live: bool,
 }
 
 /// A program the shell can run that is not built into it.
@@ -381,6 +385,7 @@ pub struct Shell {
     history: RefCell<Vec<String>>,
     stop: Cell<bool>,
     tools: RefCell<Vec<Rc<dyn External>>>,
+    live: Cell<bool>,
 }
 
 impl std::fmt::Debug for Shell {
@@ -397,6 +402,13 @@ impl Shell {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Says whether the terminal this shell is used from can show a
+    /// program's output while it runs. If so, a program whose output is not
+    /// going into a pipe or a file is told (see [`Invocation::live`]).
+    pub fn set_live_output(&self, live: bool) {
+        self.live.set(live);
     }
 
     /// Adds programs to this shell.
@@ -541,8 +553,9 @@ impl Shell {
                 }
             };
             let name = args[0].clone();
+            let live = self.live.get() && index == last && command.redirect.is_none();
             let mut run = self
-                .dispatch(&name, &args[1..], stdin.take(), workspace, output)
+                .dispatch(&name, &args[1..], stdin.take(), workspace, output, live)
                 .await;
             if let Some((target, append)) = command.redirect {
                 let target = self.resolve(&target);
@@ -618,6 +631,7 @@ impl Shell {
         stdin: Option<String>,
         workspace: &Workspace,
         output: &mut Output,
+        live: bool,
     ) -> Run {
         match name {
             "help" => Run::ok(self.help_text()),
@@ -670,6 +684,7 @@ impl Shell {
                     stdin: stdin.as_deref(),
                     cwd: &cwd,
                     workspace,
+                    live,
                 })
                 .await
             }
