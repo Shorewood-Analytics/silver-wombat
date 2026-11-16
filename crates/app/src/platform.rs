@@ -177,7 +177,11 @@ pub fn watch_typing(
 /// Calls `on_shortcut` when Control+K or Command+K is pressed, whatever has
 /// the keyboard's focus. The key goes no further: browsers give it no
 /// meaning of their own inside a page.
-pub fn watch_finder_shortcut(on_shortcut: impl Fn() + 'static) {
+/// Calls `on_shortcut` with the letter when Control or Command is pressed
+/// with one of `letters`, wherever the keyboard's focus is, and keeps the
+/// browser from acting on it (Command with F would open the browser's own
+/// find, which cannot see into the canvas).
+pub fn watch_shortcuts(letters: &'static str, on_shortcut: impl Fn(char) + 'static) {
     use wasm_bindgen::closure::Closure;
     use web_sys::KeyboardEvent;
 
@@ -186,10 +190,14 @@ pub fn watch_finder_shortcut(on_shortcut: impl Fn() + 'static) {
     };
     let handler = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
         let chord = (event.ctrl_key() || event.meta_key()) && !event.alt_key();
-        if chord && event.key().eq_ignore_ascii_case("k") {
+        let key = event.key().to_ascii_lowercase();
+        let letter = letters
+            .chars()
+            .find(|letter| chord && key.len() == 1 && key.starts_with(*letter));
+        if let Some(letter) = letter {
             event.prevent_default();
             event.stop_propagation();
-            on_shortcut();
+            on_shortcut(letter);
         }
     });
     let _ = document.add_event_listener_with_callback_and_bool(

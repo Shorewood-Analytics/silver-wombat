@@ -283,6 +283,9 @@ pub struct Ide {
     keys_beside_terminal: bool,
     finder: Option<Finder>,
     finder_input: Entity<InputState>,
+    /// Find in the open file: whether its bar is showing, and its field.
+    search_open: bool,
+    search_input: Entity<InputState>,
     suggest: Suggest,
     busy: bool,
     notice: Option<String>,
@@ -357,12 +360,19 @@ impl Ide {
             cx.new(|cx| InputState::new(window, cx).placeholder("Describe the change"));
         let finder_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("A few letters of its name"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Text to find"));
         let editor = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let terminal = read_only(window, cx, "text");
         let diff = read_only(window, cx, "diff");
 
         let subscriptions = Self::watch_inputs(
-            [&repo_input, &command_input, &finder_input, &commit_input],
+            [
+                &repo_input,
+                &command_input,
+                &finder_input,
+                &commit_input,
+                &search_input,
+            ],
             window,
             cx,
         );
@@ -387,6 +397,8 @@ impl Ide {
             keys_beside_terminal: false,
             finder: None,
             finder_input,
+            search_open: false,
+            search_input,
             suggest: Suggest::new(),
             busy: false,
             notice: None,
@@ -538,16 +550,21 @@ impl Ide {
                 });
             });
         });
-        // With a keyboard attached, Control or Command with K opens the finder,
-        // wherever the keyboard's focus is.
+        // With a keyboard attached, Control or Command with K opens the finder
+        // and with F finds in the open file, wherever the keyboard's focus is.
         let ide = cx.weak_entity();
-        platform::watch_finder_shortcut(move || {
+        platform::watch_shortcuts("kf", move |letter| {
             let ide = ide.clone();
             crate::with_app(|cx| {
                 let _ = handle.update(cx, |_, window, cx| {
                     let _ = ide.update(cx, |this, cx| {
-                        if this.screen == Screen::Work {
+                        if this.screen != Screen::Work {
+                            return;
+                        }
+                        if letter == 'k' {
                             this.open_finder(window, cx);
+                        } else {
+                            this.open_search(window, cx);
                         }
                     });
                 });
@@ -557,7 +574,13 @@ impl Ide {
 
     /// What Enter and typing do in each of the single-line fields.
     fn watch_inputs(
-        [repo_input, command_input, finder_input, commit_input]: [&Entity<InputState>; 4],
+        [
+            repo_input,
+            command_input,
+            finder_input,
+            commit_input,
+            search_input,
+        ]: [&Entity<InputState>; 5],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
@@ -598,10 +621,25 @@ impl Ide {
                     }
                 },
             ),
+            cx.subscribe_in(
+                search_input,
+                window,
+                |this, _, event: &InputEvent, _, cx| match event {
+                    InputEvent::PressEnter { .. } => this.search_step(true, cx),
+                    InputEvent::Change => this.search_changed(cx),
+                    _ => {}
+                },
+            ),
         ];
         // Redraw when a field's text changes, so that what a screen reader is
         // told is in the field stays true.
-        for field in [repo_input, command_input, finder_input, commit_input] {
+        for field in [
+            repo_input,
+            command_input,
+            finder_input,
+            commit_input,
+            search_input,
+        ] {
             watching.push(cx.observe(field, |_, _, cx| cx.notify()));
         }
         watching
@@ -866,6 +904,10 @@ impl Ide {
                             .language(language)
                             .line_number(true)
                             .soft_wrap(true)
+                            // The editor's own find panel is drawn where no
+                            // screen reader or switch can reach it. The app
+                            // has its own (see `search_bar`).
+                            .searchable(false)
                             .default_value(text)
                     });
                     this.editor_subscription = Some(cx.subscribe_in(
@@ -883,6 +925,10 @@ impl Ide {
                     this.editor_watch = Some(cx.observe(&editor, |_, _, cx| cx.notify()));
                     this.suggest.offer = None;
                     this.editor = editor;
+                    // A search in progress carries on in the new text.
+                    if this.search_open {
+                        this.search_changed(cx);
+                    }
                     if let Some(work) = &mut this.work {
                         work.open = Some(file);
                         work.viewed = None;
@@ -2048,6 +2094,126 @@ impl Ide {
         ));
     }
 
+    // ----- Find in the open file -----
+    //
+    // A bar over the editor: a field for the text, how many places have it,
+    // and buttons to step through them. The editor does the searching and
+    // the highlighting; this is the part a person and a screen reader use.
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_file = self
+            .work
+            .as_ref()
+            .is_some_and(|work| work.open.is_some() && work.viewed.is_none());
+        if !has_file {
+            return;
+        }
+        self.search_open = true;
+        self.pane = Pane::Editor;
+        self.search_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        self.search_changed(cx);
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.editor.update(cx, EditorState::close_search);
+        // The field is going away. Let go of the keyboard, so that Tab moves
+        // between the page's controls again.
+        window.blur(cx);
+        cx.notify();
+    }
+
+    /// Looks for what is typed, and shows the first place at or after what
+    /// is on screen.
+    fn search_changed(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().to_string();
+        self.editor.update(cx, |editor, cx| {
+            editor.set_search_query(query, true, cx);
+            // The place it starts at may be off screen. Stepping back and
+            // forward again returns to it, and scrolls it into view.
+            if editor.previous_search_match(cx).is_some() {
+                editor.next_search_match(cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn search_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            if forward {
+                editor.next_search_match(cx);
+            } else {
+                editor.previous_search_match(cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// "2 of 5", for the eye and for a screen reader.
+    fn search_count(&self, cx: &App) -> String {
+        if self.search_input.read(cx).value().is_empty() {
+            return "Type the text to find.".to_owned();
+        }
+        let editor = self.editor.read(cx);
+        let matcher = &editor.search_session().matcher;
+        match matcher.current() {
+            Some(index) => format!("{} of {}", index + 1, matcher.len()),
+            None => "Not found".to_owned(),
+        }
+    }
+
+    fn search_bar(&self, cx: &mut Context<Self>) -> Div {
+        let found = !self.editor.read(cx).search_session().matcher.is_empty();
+        v_flex()
+            .p_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Self::field(
+                            "search",
+                            "Find in this file",
+                            &self.search_input,
+                            Self::typed(&self.search_input, cx),
+                        )
+                        .flex_1(),
+                    )
+                    .child(Self::say(
+                        "search-count",
+                        Role::Status,
+                        self.search_count(cx),
+                    )),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("search-previous", "Previous")
+                            .named("Previous place found")
+                            .disabled(!found),
+                        |this, _, cx| this.search_step(false, cx),
+                    ))
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("search-next", "Next")
+                            .named("Next place found")
+                            .disabled(!found),
+                        |this, _, cx| this.search_step(true, cx),
+                    ))
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("search-close", "Close").named("Close find"),
+                        Self::close_search,
+                    )),
+            )
+    }
+
     // ----- Finder -----
     //
     // "Go to": type a few letters of a file's name, or of an action, and
@@ -2799,12 +2965,19 @@ impl Ide {
                     .gap_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
+                    .items_center()
                     .child(Self::say("file-name", Role::Section, path::display(&file)).flex_1())
                     .child(
                         Self::say("file-state", Role::Status, state)
                             .text_color(cx.theme().muted_foreground),
-                    ),
+                    )
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("search-open", "Find").named("Find in this file"),
+                        Self::open_search,
+                    )),
             )
+            .children(self.search_open.then(|| self.search_bar(cx)))
             .child(Self::code(
                 "editor",
                 format!("Code editor, {}", path::display(&file)),

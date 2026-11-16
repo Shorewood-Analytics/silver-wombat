@@ -321,6 +321,27 @@ try {
   check(await waitForStatus("Checkpointed to GitHub", 15_000), "a few seconds later: Checkpointed to GitHub");
   await scan("editor");
 
+  // --- Find in the open file ---
+  const counted = (text) => eventually(async () => (await heard("status")).includes(text), 8_000);
+  await press("Find in this file");
+  await typeInto("Find in this file", "greet");
+  check(await counted("1 of 3"), "Find says how many places have the text and which one it is at (1 of 3)");
+  await press("Next place found");
+  check(await counted("2 of 3"), "Next goes to the next place");
+  await press("Previous place found");
+  await press("Previous place found");
+  check(await counted("3 of 3"), "Previous goes back, and from the first place round to the last");
+  await page.keyboard.press("Enter");
+  check(await counted("1 of 3"), "Enter in the field goes to the next place, round to the first");
+  await scan("editor with find");
+  await typeInto("Find in this file", "zebra");
+  check((await counted("Not found")) && (await button("Next place found").isDisabled()), "text that is not in the file says so, and there is nowhere to step to");
+  await press("Close find");
+  check(await eventually(async () => (await field("Find in this file").count()) === 0), "Close puts the bar away");
+  await page.keyboard.press("Control+f");
+  check(await eventually(async () => (await field("Find in this file").count()) === 1), "Control+F opens it from a keyboard");
+  await press("Close find");
+
   // --- Terminal ---
   await press("Terminal");
   await typeInto("Command", "grep -c 'smoke test' app/main.py && git status");
