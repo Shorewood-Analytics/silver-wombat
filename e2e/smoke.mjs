@@ -449,6 +449,59 @@ try {
   await press("Remove the downloaded model for code suggestions");
   check(await status("was removed from this device"), "and the downloaded model can be removed");
 
+  // --- Files from this device ---
+  await press("Files");
+  const importButton = await button("Add files from this device").evaluate((e) => e.getBoundingClientRect().toJSON());
+  const chooser = page.waitForEvent("filechooser", { timeout: 15_000 });
+  // A real tap: browsers open a file picker only for one.
+  await page.touchscreen.tap(importButton.x + importButton.width / 2, importButton.y + importButton.height / 2);
+  await (await chooser).setFiles([
+    { name: "from-device.py", mimeType: "text/x-python", buffer: Buffer.from("print('from the device')\n") },
+    { name: "photo.bin", mimeType: "application/octet-stream", buffer: Buffer.from([0xff, 0xfe, 0x00, 0x80]) },
+  ]);
+  check((await status("Added 1 file to")) && (await status("photo.bin")), "a text file picked from the device is added, and one that is not text is named as left out");
+  check(await eventually(async () => (await button("from-device.py  (new)").count()) === 1), "the added file is in the file list, marked new");
+
+  // --- When the device cannot store the work, the app must not say it did ---
+  const saveState = () => layer.locator('[data-key="save-state"]').textContent();
+  await page.evaluate(() => {
+    const full = () => {
+      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    };
+    globalThis.realStorage = [FileSystemFileHandle.prototype.createWritable, Storage.prototype.setItem];
+    FileSystemFileHandle.prototype.createWritable = async () => full();
+    Storage.prototype.setItem = full;
+  });
+  await press("Terminal");
+  await runLine("echo more >> letters.txt");
+  check(await eventually(async () => (await saveState()) === "Not saved on this device", 10_000), "with storage full, the state reads: Not saved on this device");
+  await settle(1500);
+  check((await saveState()) === "Not saved on this device", "and it keeps saying so");
+  await page.evaluate(() => {
+    [FileSystemFileHandle.prototype.createWritable, Storage.prototype.setItem] = globalThis.realStorage;
+  });
+  await runLine("echo again >> letters.txt");
+  check(await waitForStatus("Saved on this device", 10_000), "once storage works again, the next change is saved");
+
+  // --- Leaving the page mid-edit: the work is kept at once ---
+  await page.evaluate(() => {
+    // The normal save never finishes, as if the phone froze the page first.
+    FileSystemFileHandle.prototype.createWritable = () => new Promise(() => {});
+  });
+  await runLine("echo last words >> letters.txt");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { get: () => true, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  check(await page.evaluate(() => Object.keys(localStorage).some((key) => key.endsWith(".last-moment") && localStorage.getItem(key).includes("last words"))), "when the page is hidden with work not yet saved, it is written to the device immediately");
+  check(await eventually(async () => (await saveState()) === "Saved on this device", 5_000), "and only then does the state read: Saved on this device");
+  await openDemo();
+  await press("Try the demo (no account)");
+  check(await hears("status", (text) => text.startsWith("Restored")), "after reopening, that work is restored");
+  await press("Terminal");
+  await runLine("tail -n 1 letters.txt");
+  check(await says("last words", 15_000), "including the last change made before leaving");
+
   check(errors.length === 0, `no errors in the browser console${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
 
   // --- The same app on WebGPU: drawing, and the model on the GPU ---

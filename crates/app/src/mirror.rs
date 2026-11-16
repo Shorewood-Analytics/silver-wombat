@@ -307,9 +307,10 @@ fn secret_field(key: &str) -> Option<web_sys::HtmlInputElement> {
 
 /// What is typed in the [`Role::Secret`] field with this key.
 pub fn secret(key: &str) -> String {
-    secret_field(key)
-        .map(|field| field.value())
-        .unwrap_or_default()
+    match secret_field(key) {
+        Some(field) => field.value(),
+        None => String::new(),
+    }
 }
 
 /// Empties that field.

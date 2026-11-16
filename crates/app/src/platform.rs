@@ -375,12 +375,16 @@ async fn read_file(key: &str) -> Result<String, JsValue> {
 pub async fn keep(key: &str, text: &str) -> Result<Kept, String> {
     match write_file(key, text).await {
         Ok(()) => {
-            // An older copy in the fallback store would be stale now.
+            // Older copies in the fallback store would be stale now.
             forget(key);
+            forget(&last_moment_key(key));
             Ok(Kept::Files)
         }
         Err(files_error) => save(key, text)
-            .map(|()| Kept::Small)
+            .map(|()| {
+                forget(&last_moment_key(key));
+                Kept::Small
+            })
             .map_err(|small_error| {
                 format!(
                     "file storage: {}; fallback storage: {small_error}",
@@ -390,8 +394,125 @@ pub async fn keep(key: &str, text: &str) -> Result<Kept, String> {
     }
 }
 
-/// Reads back unsaved work kept by [`keep`], and says where it was found.
+fn last_moment_key(key: &str) -> String {
+    format!("{key}.last-moment")
+}
+
+/// Keeps unsaved work at once, without waiting, for the moment the page is
+/// being hidden or closed and there may be no time for [`keep`] to finish.
+/// It goes to the small fallback store, the only one that can be written
+/// without waiting, and is read back in preference to anything older.
+pub fn keep_now(key: &str, text: &str) -> Result<(), String> {
+    save(&last_moment_key(key), text)
+}
+
+/// Calls `on_hidden` when the page is hidden or about to be unloaded: the
+/// person switched app or tab, locked the phone, or closed the page. On a
+/// phone this is often the last thing a page gets to do.
+pub fn watch_hidden(on_hidden: impl Fn() + 'static) {
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let on_hidden = Rc::new(on_hidden);
+    let hidden = on_hidden.clone();
+    let watched = document.clone();
+    let on_visibility = Closure::<dyn FnMut()>::new(move || {
+        if watched.hidden() {
+            hidden();
+        }
+    });
+    let _ = document.add_event_listener_with_callback(
+        "visibilitychange",
+        on_visibility.as_ref().unchecked_ref(),
+    );
+    on_visibility.forget();
+    let on_page_hide = Closure::<dyn FnMut()>::new(move || on_hidden());
+    let _ =
+        window.add_event_listener_with_callback("pagehide", on_page_hide.as_ref().unchecked_ref());
+    on_page_hide.forget();
+}
+
+/// One file the person picked from their device.
+pub struct Picked {
+    pub name: String,
+    /// The file's text, or `None` if it is not text or is too big.
+    pub text: Option<String>,
+}
+
+/// Opens the browser's file picker, now. Browsers only allow that while a
+/// tap or key press is being handled, so this part does not wait for
+/// anything; the reading is done by [`read_picked`].
+pub fn open_file_picker() -> Option<(web_sys::HtmlInputElement, js_sys::Promise)> {
+    use wasm_bindgen::closure::Closure;
+
+    let document = web_sys::window()?.document()?;
+    let input: web_sys::HtmlInputElement =
+        document.create_element("input").ok()?.dyn_into().ok()?;
+    input.set_type("file");
+    input.set_multiple(true);
+    let picked = js_sys::Promise::new(&mut |resolve, _| {
+        // Whichever comes first: files chosen, or the picker dismissed.
+        for event in ["change", "cancel"] {
+            let resolve = resolve.clone();
+            let done = Closure::once_into_js(move || {
+                let _ = resolve.call0(&JsValue::NULL);
+            });
+            let _ = input.add_event_listener_with_callback(event, done.unchecked_ref());
+        }
+    });
+    input.click();
+    Some((input, picked))
+}
+
+/// Waits for the person to pick files in the picker [`open_file_picker`]
+/// opened, and reads them. Files that are not valid UTF-8 text, or are over
+/// `max_bytes`, come back without text. Empty if they pick nothing.
+pub async fn read_picked(
+    (input, picked): (web_sys::HtmlInputElement, js_sys::Promise),
+    max_bytes: u64,
+) -> Vec<Picked> {
+    let _ = JsFuture::from(picked).await;
+    let Some(files) = input.files() else {
+        return Vec::new();
+    };
+    let mut read = Vec::new();
+    for index in 0..files.length() {
+        let Some(file) = files.get(index) else {
+            continue;
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a file size, compared with a limit"
+        )]
+        let small_enough = file.size() <= max_bytes as f64;
+        let text = if small_enough {
+            match JsFuture::from(file.array_buffer()).await {
+                Ok(buffer) => String::from_utf8(js_sys::Uint8Array::new(&buffer).to_vec()).ok(),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        read.push(Picked {
+            name: file.name(),
+            text,
+        });
+    }
+    read
+}
+
+/// Reads back unsaved work kept by [`keep`] or [`keep_now`], and says where
+/// it was found.
 pub async fn recall(key: &str) -> Option<(String, Kept)> {
+    if let Some(text) = load(&last_moment_key(key)) {
+        return Some((text, Kept::Small));
+    }
     match read_file(key).await {
         Ok(text) => Some((text, Kept::Files)),
         Err(_) => load(key).map(|text| (text, Kept::Small)),

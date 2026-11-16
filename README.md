@@ -7,11 +7,12 @@ There is no server: the page talks straight to the GitHub API with your token.
 ## What works today
 
 - Sign in with a GitHub personal access token, or try the built-in demo with no account.
-- Open any repository the token can reach, browse folders and open text files.
+- Open any repository the token can reach, browse folders and open text files. Files > Add files from this device brings in text files from the phone or tablet as unsaved changes.
 - Edit with syntax highlighting. Dark and Midnight themes, sans font, 1.5 line spacing, optional fixed-width code font.
 - Three save states, always visible: **Not yet saved**, **Saved on this device**, **Checkpointed to GitHub**.
   A state is only shown after the write that earns it has succeeded.
 - Continuous save: a pause in typing saves to the device, and a few seconds later checkpoints to the `autosave/<branch>` branch on GitHub. Your real branch is not touched until you commit.
+  When the page is hidden or closed (switching app, locking the phone), anything not yet saved is written to the device at once. If the device cannot store it, the state reads "Not saved on this device" until it can.
 - Commit all changes as one commit. Before writing, the app fetches the branch and refuses if any changed file differs on GitHub from what you started with. Nothing is overwritten.
 - A terminal that runs in the browser on the open repository: `ls`, `cd`, `cat`, `head`, `tail`, `wc`, `grep`, `find`, `echo`, `touch`, `rm`, `mv`, `cp`, `open`, `save`, and `git status | diff | commit -m | log | branch | switch | restore | pull`, with pipes, `&&`, `;`, `>` and `>>`.
 - Python 3.12, 3.13, 3.14 and 3.15 in that terminal, running in the browser tab. See [Python](#python).

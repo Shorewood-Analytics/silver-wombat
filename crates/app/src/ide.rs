@@ -22,6 +22,7 @@ use silver_wombat_core::github::{GitHub, Repo};
 use silver_wombat_core::python::PythonTool;
 use silver_wombat_core::screen::{self, Cap, KEY_PAGES, Layout, Pane, Press};
 use silver_wombat_core::shell::Shell;
+use silver_wombat_core::workspace::MAX_TEXT_BYTES;
 use silver_wombat_core::workspace::{
     Change, ChangeKind, DirEntry, EntryKind, FileContent, SaveState, Workspace,
 };
@@ -375,6 +376,81 @@ impl Ide {
         this
     }
 
+    /// The page is being hidden or closed. Keep unsaved work at once: on a
+    /// phone the page may never run again. The save state moves only if that
+    /// write succeeded.
+    fn page_hidden(&mut self, cx: &mut Context<Self>) {
+        let Some(work) = &mut self.work else { return };
+        if work.workspace.save_state() != Some(SaveState::NotSaved) {
+            return;
+        }
+        let demo = self.session.as_ref().is_some_and(|session| session.demo);
+        let (revision, json) = work.workspace.export_drafts();
+        match platform::keep_now(&drafts_key(&work.workspace, demo), &json) {
+            Ok(()) => {
+                work.workspace.mark_on_device(revision);
+                work.device_error = None;
+                self.kept = Some(Kept::Small);
+            }
+            Err(reason) => work.device_error = Some(reason),
+        }
+        cx.notify();
+    }
+
+    /// Adds files picked from this device to the folder being shown, as
+    /// unsaved changes like any other edit.
+    fn import_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let workspace = work.workspace.clone();
+        let dir = work.dir.clone();
+        // The picker has to be opened here, while the tap is being handled.
+        let Some(picker) = platform::open_file_picker() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let files = platform::read_picked(picker, MAX_TEXT_BYTES).await;
+            if files.is_empty() {
+                return;
+            }
+            let mut added = 0;
+            let mut skipped = Vec::new();
+            for file in files {
+                let written = match &file.text {
+                    Some(text) => workspace
+                        .write(&path::join(&dir, &file.name), text)
+                        .await
+                        .is_ok(),
+                    None => false,
+                };
+                if written {
+                    added += 1;
+                } else {
+                    skipped.push(file.name);
+                }
+            }
+            this.update_in(cx, |this, window, cx| {
+                let rest = if skipped.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " Not added, because only text files up to 2 MB can be: {}.",
+                        skipped.join(", ")
+                    )
+                };
+                let notice = format!(
+                    "Added {added} file{} to {}.{rest}",
+                    if added == 1 { "" } else { "s" },
+                    path::display(&dir)
+                );
+                this.notice = Some(notice);
+                this.refresh_files(window, cx);
+                this.changed(window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Things the page itself is watched for, because they do not arrive as
     /// events on any one control: swipes, a character typed while Control is
     /// held on the extra keys, and the finder's keyboard shortcut.
@@ -401,6 +477,13 @@ impl Ide {
                         this.typed_with_control(&typed, window, cx);
                     });
                 });
+            });
+        });
+        let ide = cx.weak_entity();
+        platform::watch_hidden(move || {
+            let ide = ide.clone();
+            crate::with_app(|cx| {
+                let _ = ide.update(cx, Self::page_hidden);
             });
         });
         // With a keyboard attached, Control or Command with K opens the finder,
@@ -688,7 +771,21 @@ impl Ide {
         }
     }
 
+    /// Opens a file in the editor and shows the editor.
     fn open_file(&mut self, file: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_file(file, true, window, cx);
+    }
+
+    /// Puts a file's text in the editor. With `reveal`, also switches to the
+    /// editor; without, the person stays where they are (a terminal command
+    /// that rewrote the open file should not pull them out of the terminal).
+    fn load_file(
+        &mut self,
+        file: String,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(work) = &self.work else { return };
         let workspace = work.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -723,8 +820,10 @@ impl Ide {
                     if let Some(work) = &mut this.work {
                         work.open = Some(file);
                     }
-                    this.pane = Pane::Editor;
-                    this.notice = None;
+                    if reveal {
+                        this.pane = Pane::Editor;
+                        this.notice = None;
+                    }
                     cx.notify();
                 }
                 Ok(FileContent::Binary { size }) => {
@@ -938,7 +1037,7 @@ impl Ide {
             let current = workspace.read(&file).await;
             this.update_in(cx, |this, window, cx| match current {
                 Ok(FileContent::Text(text)) if text.as_str() != shown.as_ref() => {
-                    this.open_file(file, window, cx);
+                    this.load_file(file, false, window, cx);
                 }
                 Err(Error::NotFound(_)) => {
                     if let Some(work) = &mut this.work {
@@ -2265,6 +2364,11 @@ impl Ide {
                     .overflow_y_scroll()
                     .children(rows),
             )
+            .child(Self::tap(
+                cx,
+                Tap::new("import", "Add files from this device"),
+                Self::import_files,
+            ))
             .into_any_element()
     }
 
