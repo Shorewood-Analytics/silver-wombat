@@ -32,7 +32,8 @@ const server = createServer(async (request, response) => {
   const file = join(dist, normalize(decodeURIComponent(new URL(request.url, "http://x").pathname)));
   if (!file.startsWith(dist)) return response.writeHead(403).end();
   try {
-    response.writeHead(200, { "Content-Type": types[extname(file)] ?? "application/octet-stream" }).end(await readFile(file));
+    const body = await readFile(file);
+    response.writeHead(200, { "Content-Type": types[extname(file)] ?? "application/octet-stream" }).end(body);
   } catch {
     response.writeHead(404).end();
   }
