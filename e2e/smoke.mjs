@@ -14,7 +14,8 @@
 // Safari is built on (`npx playwright-core install --with-deps webkit` first).
 // It is not Safari and not iOS, but it is the nearest thing that runs on a
 // Linux machine. The parts that need Chrome's own controls are left out there:
-// the emulated notch and zoom, the swipe gesture, and the WebGPU session.
+// the emulated notch and zoom, and the WebGPU session. The swipe is tried
+// with made-up touch events in place of Chrome's real ones.
 
 import { createServer } from "node:http";
 import { mkdtemp, readFile } from "node:fs/promises";
@@ -569,7 +570,22 @@ try {
   // --- Swipe between panes (a touch gesture; the tabs do the same) ---
   // The touch carries its own clock, so how long it "took" does not depend
   // on how fast this machine is.
+  // In WebKit there is no way to send a real touch that moves, so the same
+  // events a touch produces are made up in the page. (SYNTHETIC_SWIPE=1 tries
+  // that path in Chrome.) This checks what the app does with them, not that
+  // the browser sends them.
+  const synthetic = inWebKit || process.env.SYNTHETIC_SWIPE === "1";
   const swipe = async (fromX, toX, seconds = 0.15) => {
+    if (synthetic) {
+      await page.evaluate(async ([fromX, toX, wait]) => {
+        const send = (type, x) => document.dispatchEvent(new PointerEvent(type, { pointerType: "touch", pointerId: 7, isPrimary: true, clientX: x, clientY: 300, bubbles: true }));
+        send("pointerdown", fromX);
+        await new Promise((done) => setTimeout(done, wait));
+        send("pointerup", toX);
+      }, [fromX, toX, seconds * 1000]);
+      await settle(600);
+      return;
+    }
     const start = Date.now() / 1000;
     await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: fromX, y: 300 }], timestamp: start });
     for (const part of [0.5, 1]) {
@@ -578,23 +594,18 @@ try {
     await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [], timestamp: start + seconds });
     await settle(600);
   };
-  if (cdp) {
-    await swipe(320, 120);
-    check(await eventually(async () => (await field("Commit message").count()) + (await layer.getByRole("heading", { name: "Nothing changed since the last commit." }).count()) >= 1 && (await field("Command").count()) === 0, 5_000), "a quick swipe to the left goes from Terminal to Changes");
-    await swipe(120, 320);
-    check(await eventually(async () => (await field("Command").count()) === 1, 5_000), "a swipe to the right goes back to Terminal");
-    await swipe(320, 120, 1.5);
-    check((await field("Command").count()) === 1, "a slow drag is not a swipe");
-    await swipe(8, 240);
-    check((await field("Command").count()) === 1, "nor is a swipe from the screen's edge, which is Safari's Back");
-    await press("More");
-    await press("Swipe to change pane: on. Turn off");
-    await swipe(120, 320);
-    check((await button("Swipe to change pane: off. Turn on").count()) === 1, "swiping can be switched off, and then a swipe does nothing");
-  } else {
-    console.log("     (not run in WebKit: the swipe gesture)");
-    await press("More");
-  }
+  await swipe(320, 120);
+  check(await eventually(async () => (await field("Commit message").count()) + (await layer.getByRole("heading", { name: "Nothing changed since the last commit." }).count()) >= 1 && (await field("Command").count()) === 0, 5_000), "a quick swipe to the left goes from Terminal to Changes");
+  await swipe(120, 320);
+  check(await eventually(async () => (await field("Command").count()) === 1, 5_000), "a swipe to the right goes back to Terminal");
+  await swipe(320, 120, 1.5);
+  check((await field("Command").count()) === 1, "a slow drag is not a swipe");
+  await swipe(8, 240);
+  check((await field("Command").count()) === 1, "nor is a swipe from the screen's edge, which is Safari's Back");
+  await press("More");
+  await press("Swipe to change pane: on. Turn off");
+  await swipe(120, 320);
+  check((await button("Swipe to change pane: off. Turn on").count()) === 1, "swiping can be switched off, and then a swipe does nothing");
 
   // --- Code suggestions, with the stand-in model ---
   const status = (needle, timeout = 30_000) => eventually(async () => (await heard("status")).some((text) => text.includes(needle)), timeout);
@@ -654,6 +665,7 @@ try {
   await runLine("echo '# top note' > top.py && cat app/greet.py >> top.py && cat top.py > app/greet.py && rm top.py");
   await commitAs("A note at the top");
   check(await status("also changed on GitHub since you started"), "the commit is refused again: the file changed on GitHub too");
+  await scan("changes with a file to settle");
   await press("Merge both versions of /app/greet.py");
   check(await status("Merged /app/greet.py: your changes and GitHub's are both in it"), "Merge both combines changes to different lines and says so");
   await press("Terminal");
@@ -678,6 +690,7 @@ try {
   check((await says("<<<<<<< mine", 15_000)) && (await says("# a better note")) && (await says(">>>>>>> GitHub")), "both versions are in the file between marker lines");
   await commitAs("A better note");
   check(await status("still has places marked <<<<<<< mine"), "a commit is refused while a marked place is left");
+  check(await hears("paragraph", (text) => text.includes("/app/greet.py") && text.includes("places marked <<<<<<< mine to settle")), "and the file's row in Changes says it has marked places");
   await press("Terminal");
   await runLine("echo '# a settled note' > top.py && tail -n 2 app/greet.py >> top.py && cat top.py > app/greet.py && rm top.py");
   await commitAs("Settled");

@@ -2951,10 +2951,13 @@ impl Ide {
             .into_any_element()
     }
 
+    /// One changed file. `conflict`: it also changed on GitHub and that is
+    /// not settled. `marked`: a merge left places in it for the person to settle.
     fn change_row(
         index: usize,
         change: &Change,
         conflict: bool,
+        marked: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let kind = match change.kind {
@@ -2976,7 +2979,15 @@ impl Ide {
                 .child(Self::say(
                     &format!("change-{index}"),
                     Role::Text,
-                    format!("{kind}: {shown}. {}.", change.state.label()),
+                    format!(
+                        "{kind}: {shown}. {}.{}",
+                        change.state.label(),
+                        if marked {
+                            " It has places marked <<<<<<< mine to settle before it can be committed."
+                        } else {
+                            ""
+                        }
+                    ),
                 ))
                 .child(
                     h_flex()
@@ -3081,11 +3092,18 @@ impl Ide {
         let device_error = work.device_error.clone();
         let busy = self.busy;
         let conflicts = work.conflicts.clone();
+        let marked = work.workspace.unsettled();
         let rows: Vec<AnyElement> = changes
             .iter()
             .enumerate()
             .map(|(index, change)| {
-                Self::change_row(index, change, conflicts.contains(&change.path), cx)
+                Self::change_row(
+                    index,
+                    change,
+                    conflicts.contains(&change.path),
+                    marked.contains(&change.path),
+                    cx,
+                )
             })
             .collect();
         let nothing = changes.is_empty();
