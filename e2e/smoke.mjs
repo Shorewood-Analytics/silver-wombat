@@ -532,6 +532,14 @@ try {
   await runLine("cat keys.txt");
   check(await says("1X{2abc", 15_000), "Control then Z undoes (the replaced text is back)");
   await scan("terminal with the extra keys");
+  await press("Editor");
+  await field("Code editor, /keys.txt").dispatchEvent("click");
+  await eventually(() => page.evaluate(() => document.activeElement?.tagName === "TEXTAREA"));
+  await press("Control");
+  await page.keyboard.type("f");
+  check(await eventually(async () => (await field("Find in this file").count()) === 1), "Control then F from the extra keys opens Find");
+  await press("Close find");
+  await press("Terminal");
 
   // --- Wider screens: an open iPhone Duo, then an iPad Pro on its side ---
   const names = () => layer.locator("button").evaluateAll((all) => all.map((e) => e.getAttribute("aria-label") ?? e.textContent));
@@ -735,6 +743,23 @@ try {
   ]);
   check((await status("Added 1 file to")) && (await status("photo.bin")), "a text file picked from the device is added, and one that is not text is named as left out");
   check(await eventually(async () => (await button("from-device.py  (new)").count()) === 1), "the added file is in the file list, marked new");
+
+  // A new file: a typed name, made empty in the folder being shown, and opened.
+  await typeInto("Name for a new file", "notes/today.md");
+  await press("Create the new file");
+  check(await eventually(async () => (await field("Code editor, /notes/today.md").count()) === 1), "a new file is made with the typed name, folders on the way included, and opened");
+  await press("Files");
+  check((await field("Name for a new file").textContent()) === "" && (await layer.getByRole("button", { name: /^Folder notes/ }).count()) === 1, "its folder is in the file list, and the name field is empty again");
+  await scan("files with the new-file field");
+  await typeInto("Name for a new file", "notes/today.md");
+  await press("Create the new file");
+  check(await status("/notes/today.md is already there. Nothing was changed."), "a name that is taken is refused, and nothing is written over");
+  await page.keyboard.press("Control+a");
+  await page.keyboard.type("../outside.md", { delay: 10 });
+  await page.keyboard.press("Enter");
+  check(await status('Write the name without ".."'), "a name that would leave the repository is refused, with the reason");
+  await page.keyboard.press("Control+a");
+  await page.keyboard.press("Backspace");
 
   // --- When the device cannot store the work, the app must not say it did ---
   const saveState = () => layer.locator('[data-key="save-state"]').textContent();

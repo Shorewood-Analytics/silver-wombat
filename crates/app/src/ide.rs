@@ -286,6 +286,7 @@ pub struct Ide {
     /// Find in the open file: whether its bar is showing, and its field.
     search_open: bool,
     search_input: Entity<InputState>,
+    new_file_input: Entity<InputState>,
     suggest: Suggest,
     busy: bool,
     notice: Option<String>,
@@ -345,7 +346,9 @@ fn read_only(window: &mut Window, cx: &mut Context<Ide>, language: &str) -> Enti
             .language(language)
             .line_number(false)
             .indent_guides(false)
-            .soft_wrap(true);
+            .soft_wrap(true)
+            // Its own find panel cannot be reached by a screen reader.
+            .searchable(false);
         state.set_readonly(true, cx);
         state
     })
@@ -361,6 +364,8 @@ impl Ide {
         let finder_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("A few letters of its name"));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Text to find"));
+        let new_file_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Name for a new file"));
         let editor = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let terminal = read_only(window, cx, "text");
         let diff = read_only(window, cx, "diff");
@@ -372,6 +377,7 @@ impl Ide {
                 &finder_input,
                 &commit_input,
                 &search_input,
+                &new_file_input,
             ],
             window,
             cx,
@@ -399,6 +405,7 @@ impl Ide {
             finder_input,
             search_open: false,
             search_input,
+            new_file_input,
             suggest: Suggest::new(),
             busy: false,
             notice: None,
@@ -444,6 +451,49 @@ impl Ide {
             Err(reason) => work.device_error = Some(reason),
         }
         cx.notify();
+    }
+
+    /// Makes an empty file with the typed name in the folder being shown, and
+    /// opens it. It is an unsaved change like any other edit.
+    fn create_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &self.work else { return };
+        let typed = self.new_file_input.read(cx).value().to_string();
+        let file = match path::for_new_file(&work.dir, &typed) {
+            Ok(file) => file,
+            Err(reason) => {
+                self.notice = Some(reason.to_owned());
+                cx.notify();
+                return;
+            }
+        };
+        let workspace = work.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            // Never write over something that is already there.
+            let made = match workspace.kind(&file).await {
+                Ok(Some(_)) => Ok(false),
+                Ok(None) => workspace.write(&file, "").await.map(|_| true),
+                Err(error) => Err(error),
+            };
+            this.update_in(cx, |this, window, cx| match made {
+                Ok(true) => {
+                    this.new_file_input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    this.refresh_files(window, cx);
+                    this.changed(window, cx);
+                    this.open_file(file, window, cx);
+                }
+                Ok(false) => {
+                    this.notice = Some(format!(
+                        "{} is already there. Nothing was changed.",
+                        path::display(&file)
+                    ));
+                    cx.notify();
+                }
+                Err(error) => this.fail(&error, cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Adds files picked from this device to the folder being shown, as
@@ -580,7 +630,8 @@ impl Ide {
             finder_input,
             commit_input,
             search_input,
-        ]: [&Entity<InputState>; 5],
+            new_file_input,
+        ]: [&Entity<InputState>; 6],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
@@ -630,6 +681,15 @@ impl Ide {
                     _ => {}
                 },
             ),
+            cx.subscribe_in(
+                new_file_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.create_file(window, cx);
+                    }
+                },
+            ),
         ];
         // Redraw when a field's text changes, so that what a screen reader is
         // told is in the field stays true.
@@ -639,6 +699,7 @@ impl Ide {
             finder_input,
             commit_input,
             search_input,
+            new_file_input,
         ] {
             watching.push(cx.observe(field, |_, _, cx| cx.notify()));
         }
@@ -2455,7 +2516,12 @@ impl Ide {
     /// key and never typed.
     fn typed_with_control(&mut self, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(target) = self.take_control() {
-            self.send_key(target, typed, true, window, cx);
+            // Control with F is the app's own find, as it is from a keyboard.
+            if target == KeyTarget::Editor && typed.eq_ignore_ascii_case("f") {
+                self.open_search(window, cx);
+            } else {
+                self.send_key(target, typed, true, window, cx);
+            }
             cx.notify();
         }
     }
@@ -2916,6 +2982,24 @@ impl Ide {
                     .gap_1()
                     .overflow_y_scroll()
                     .children(rows),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Self::field(
+                            "new-file",
+                            "Name for a new file",
+                            &self.new_file_input,
+                            Self::typed(&self.new_file_input, cx),
+                        )
+                        .flex_1(),
+                    )
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("new-file-create", "Create").named("Create the new file"),
+                        Self::create_file,
+                    )),
             )
             .child(Self::tap(
                 cx,

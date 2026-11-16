@@ -43,6 +43,32 @@ pub fn join(dir: &str, name: &str) -> String {
     }
 }
 
+/// The path of a new file called `name`, made from the folder `dir`. The name
+/// may include folders on the way (`notes/today.md`) and may start with `/`
+/// to mean the top of the repository. `Err` says what is wrong with the name,
+/// in words for the person who typed it.
+pub fn for_new_file(dir: &str, name: &str) -> Result<String, &'static str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Type a name for the new file first.");
+    }
+    if name.ends_with('/') {
+        return Err("That names a folder. Add the file's name after the last slash.");
+    }
+    if name.contains('\\') || name.chars().any(char::is_control) {
+        return Err("A file's name cannot have a backslash or a line break in it.");
+    }
+    let mut parts = name.trim_start_matches('/').split('/');
+    if parts.any(|part| part.is_empty() || part == "." || part == "..") {
+        return Err("Write the name without \"..\", \".\" or doubled slashes.");
+    }
+    let full = resolve(dir, name);
+    if full.split('/').any(|part| part == ".git") {
+        return Err("GitHub does not accept files inside a .git folder.");
+    }
+    Ok(full)
+}
+
 /// The media type of a picture a browser can show, going by the file's
 /// extension, or `None` if `path` is not one.
 #[must_use]
@@ -102,6 +128,33 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_a_new_file_and_explains_a_bad_name() {
+        assert_eq!(for_new_file("", "notes.md"), Ok("notes.md".to_owned()));
+        assert_eq!(
+            for_new_file("src", " util.py "),
+            Ok("src/util.py".to_owned())
+        );
+        assert_eq!(
+            for_new_file("src", "deep/er/a.py"),
+            Ok("src/deep/er/a.py".to_owned())
+        );
+        assert_eq!(for_new_file("src", "/top.md"), Ok("top.md".to_owned()));
+        for bad in [
+            "",
+            "   ",
+            "folder/",
+            "../up.md",
+            "a/./b",
+            "a//b",
+            "a\\b",
+            ".git/config",
+            "x/.git/y",
+        ] {
+            assert!(for_new_file("src", bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn knows_a_picture_by_its_extension() {
