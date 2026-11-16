@@ -48,3 +48,13 @@ updates:
     groups:
       ml-runtime:
         patterns: ["*"]
+  # wasm-opt, which shrinks the release build of the app.
+  - package-ecosystem: npm
+    directory: /xtask/wasm-opt
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      wasm-opt:
+        patterns: ["*"]

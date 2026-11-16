@@ -149,6 +149,9 @@ fn dist(args: &[String]) -> Result<(), String> {
         .arg("--out-dir")
         .arg(&out)
         .args(["--target", "web", "--no-typescript"]))?;
+    if profile == "release" {
+        shrink(&root, &out.join(format!("{WASM_NAME}_bg.wasm")))?;
+    }
 
     let web = root.join("web");
     let entries = fs::read_dir(&web).map_err(|error| format!("could not read web/: {error}"))?;
@@ -284,6 +287,45 @@ fn ml_runtime(root: &Path, out: &Path) -> Result<(), String> {
             .map_err(|error| format!("could not copy {file}: {error}"))?;
     }
     println!("  {bytes:>10} bytes  ml/");
+    Ok(())
+}
+
+/// Makes the app's WebAssembly smaller with Binaryen's `wasm-opt`, installing
+/// it from npm first if it is not there yet. Only the release build is shrunk:
+/// it takes minutes, and the result is what a phone has to download.
+fn shrink(root: &Path, wasm: &Path) -> Result<(), String> {
+    let source = root.join("xtask").join("wasm-opt");
+    let tool = source.join("node_modules/binaryen/bin/wasm-opt");
+    if !tool.exists() {
+        run(Command::new("npm")
+            .args(["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix"])
+            .arg(&source))
+        .map_err(|error| {
+            format!("{error}\nwasm-opt comes from npm (xtask/wasm-opt/package.json); Node.js and npm are needed to build the site.")
+        })?;
+    }
+    let size = |path: &Path| {
+        fs::metadata(path)
+            .map(|meta| meta.len())
+            .map_err(|error| format!("could not read {}: {error}", path.display()))
+    };
+    let before = size(wasm)?;
+    let smaller = wasm.with_extension("wasm.small");
+    println!("Shrinking the app with wasm-opt (a few minutes)...");
+    run(Command::new("node")
+        .arg(&tool)
+        .arg("-Os")
+        .arg(wasm)
+        .arg("-o")
+        .arg(&smaller))?;
+    let after = size(&smaller)?;
+    // An empty or missing result must not replace a working file.
+    if after == 0 {
+        return Err("wasm-opt wrote an empty file".to_owned());
+    }
+    fs::rename(&smaller, wasm)
+        .map_err(|error| format!("could not replace {}: {error}", wasm.display()))?;
+    println!("  wasm-opt: {before} bytes -> {after} bytes");
     Ok(())
 }
 

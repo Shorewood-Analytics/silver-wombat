@@ -1,0 +1,8 @@
+{
+  "name": "silver-wombat-wasm-opt",
+  "private": true,
+  "description": "Binaryen's wasm-opt, which `cargo xtask dist` uses to make the release build of the app smaller. It is a build tool only; nothing from here is served.",
+  "dependencies": {
+    "binaryen": "132.0.0"
+  }
+}

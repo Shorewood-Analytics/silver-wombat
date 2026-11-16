@@ -51,6 +51,7 @@ More > Turn code suggestions on. After a pause in typing, a suggested end of the
 - **Another model.** Put a description in `localStorage` under `silver-wombat.suggest-model` (the fields of `Model` in `crates/core/src/complete.rs`, as JSON) to use any text-generation model in Transformers.js's ONNX layout, from any host.
 
 What has been run: the whole path (settings, download, the worker, generation on the CPU and on WebGPU, the offer, Insert) in Chrome with a stand-in model of a few kilobytes. `e2e/model.mjs` loads and runs the real model in Chrome, on software WebGPU and on the CPU; CI runs it and prints what the model suggested and how long it took, without failing the build if the download does.
+The real model has run in CI's Chrome (on a GitHub runner, which has no GPU). Given `def add(a, b):` and `return ` it suggested `a + b` both ways. On the CPU it loaded in 8 seconds and answered in about 1 second. On software WebGPU it loaded in 31 seconds and answered in 13 to 15 seconds; that is the GPU being imitated in software, and says nothing about a real GPU.
 **Not run: the real model on an iPhone or iPad.** Whether 224 MB of model fits in Safari's memory on a given phone, and how fast it is there, is unknown until it is tried on one.
 
 ## Python
@@ -132,7 +133,7 @@ rustup toolchain install nightly-2026-10-31 --target wasm32-unknown-unknown --co
 cargo install wasm-bindgen-cli --version 0.2.130 --locked
 ```
 
-Node.js and npm are needed too: the build fetches the Python interpreters and the suggestion model's runtime from npm, at the versions pinned in `web/python/package-lock.json` and `web/ml/package-lock.json`.
+Node.js and npm are needed too: the build fetches the Python interpreters, the suggestion model's runtime and `wasm-opt` from npm, at the versions pinned in `web/python/package-lock.json`, `web/ml/package-lock.json` and `xtask/wasm-opt/package-lock.json`.
 
 Build the site into `dist/` and serve it:
 
@@ -142,7 +143,8 @@ python3 -m http.server -d dist 8080
 ```
 
 Then open <http://localhost:8080>. `dist/` is plain static files, so any static host works, as long as it serves `.mjs` files as JavaScript (Python needs that; GitHub Pages and `python3 -m http.server` do).
-For a faster, larger build while developing, use `cargo xtask dist --profile quick`.
+The last step of the build shrinks the app with Binaryen's `wasm-opt`, from about 29 MB to 15.5 MB (6.4 MB once the host compresses it). It takes a few minutes.
+For a faster, larger build while developing, use `cargo xtask dist --profile quick`, which skips that step.
 
 ## Open it on a phone
 
