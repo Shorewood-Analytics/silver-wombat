@@ -41,7 +41,11 @@ const online = await fetch(`${CDN}v314.0.8/full/pyodide-lock.json`, { signal: Ab
 // allowed to talk to it from this page. It uses a made-up token, so nothing
 // is read or written: GitHub's answer is "401, bad token", and getting that
 // answer at all is the point.
-const reachesGitHub = await fetch("https://api.github.com/zen", { signal: AbortSignal.timeout(8_000) }).then((reply) => reply.ok).catch(() => false);
+// GitHub allows a machine that has not signed in 60 requests an hour, and CI
+// machines share addresses, so a run can find itself refused (403 or 429).
+// Those checks are then left out, and the reason is printed.
+const gitHubSaid = await fetch("https://api.github.com/zen", { signal: AbortSignal.timeout(8_000) }).then((reply) => reply.status).catch(() => 0);
+const reachesGitHub = gitHubSaid === 200;
 
 // Code suggestions are tested with a stand-in model of a few kilobytes (see
 // fixtures/make_tiny_model.py), served here the way Hugging Face serves a
@@ -274,7 +278,7 @@ try {
     });
     check(writes.join(", ") === "POST 401, PATCH 401", `GitHub lets this page send the requests that save work (${writes.join(", ")}; 401 is its answer to the made-up token)`);
   } else {
-    console.log("     (GitHub is not reachable from here: the checks that talk to the real GitHub are not run)");
+    console.log(`     (${gitHubSaid === 0 ? "GitHub is not reachable from here" : `GitHub answered ${gitHubSaid} to this machine before the test began`}: the checks that talk to the real GitHub are not run)`);
   }
   await token.fill("");
   // Give the keyboard back to the page for the next check.
