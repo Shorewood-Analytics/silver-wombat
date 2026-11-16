@@ -28,10 +28,16 @@ const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/ja
 const CDN = "https://cdn.jsdelivr.net/pyodide/";
 const online = await fetch(`${CDN}v314.0.8/full/pyodide-lock.json`, { signal: AbortSignal.timeout(8_000) }).then((reply) => reply.ok).catch(() => false);
 
+// Code suggestions are tested with a stand-in model of a few kilobytes (see
+// fixtures/make_tiny_model.py), served here the way Hugging Face serves a
+// real one: <host>/<repository>/resolve/<revision>/<file>.
+const fixtures = join(here, "fixtures");
 const server = createServer(async (request, response) => {
   const path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname));
-  const file = join(dist, path === "/" || path === "\\" ? "index.html" : path);
-  if (!file.startsWith(dist)) return response.writeHead(403).end();
+  const fixture = path.match(/^\/fixtures\/([^/]+)\/resolve\/[^/]+\/(.+)$/);
+  const root = fixture ? fixtures : dist;
+  const file = fixture ? join(fixtures, fixture[1], fixture[2]) : join(dist, path === "/" || path === "\\" ? "index.html" : path);
+  if (!file.startsWith(root)) return response.writeHead(403).end();
   try {
     const body = await readFile(file);
     response.writeHead(200, { "Content-Type": types[extname(file)] ?? "application/octet-stream" }).end(body);
@@ -42,21 +48,34 @@ const server = createServer(async (request, response) => {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}/`;
 
-const browser = await chromium.launch({
-  executablePath: process.env.CHROME ?? "/usr/bin/google-chrome",
-  // No GPU on a CI machine: use the software renderer. The app then takes its WebGL2 path.
-  args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"],
-});
-// iPhone-sized. The pixel ratio stays 1 because the browser's emulation of a
-// higher one does not resize the canvas backing store the way a real device does.
-const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, hasTouch: true });
-const page = await context.newPage();
+// The stand-in suggestion model: after a letter it suggests the letters that follow.
+const tinyModel = {
+  name: "Test model", repo: "tiny-model", host: `${url}fixtures/`, gpu_f16: "fp32", gpu: "fp32", cpu: "fp32",
+  megabytes_gpu_f16: 1, megabytes_gpu: 1, megabytes_cpu: 1, template: "prefix", extensions: ["txt"],
+};
+// No GPU on a CI machine: Chrome's software renderer stands in. Without the
+// WebGPU switches the app takes its WebGL2 path and has no WebGPU at all.
+const software = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"];
+const softwareWebGpu = [...software, "--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-vulkan=swiftshader"];
 const errors = [];
-page.on("console", (message) => {
-  // A library download that fails is reported in the terminal and tested there.
-  if (message.type() === "error" && !message.location().url.startsWith(CDN)) errors.push(message.text().slice(0, 300));
-});
-page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 300)}`));
+let browser, context, page, layer;
+async function launch(args, settings = {}) {
+  browser = await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", args });
+  // iPhone-sized. The pixel ratio stays 1 because the browser's emulation of a
+  // higher one does not resize the canvas backing store the way a real device does.
+  context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, hasTouch: true });
+  await context.addInitScript((entries) => {
+    for (const [key, value] of entries) if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
+  }, Object.entries({ "silver-wombat.suggest-model": JSON.stringify(tinyModel), ...settings }));
+  page = await context.newPage();
+  layer = page.locator("#a11y");
+  page.on("console", (message) => {
+    // A library download that fails is reported in the terminal and tested there.
+    if (message.type() === "error" && !message.location().url.startsWith(CDN)) errors.push(message.text().slice(0, 300));
+  });
+  page.on("pageerror", (error) => errors.push(`uncaught: ${error.message.slice(0, 300)}`));
+}
+await launch(software);
 
 let failures = 0;
 function check(condition, what) {
@@ -72,7 +91,6 @@ function check(condition, what) {
       .catch(() => {});
   }
 }
-const layer = page.locator("#a11y");
 const button = (name) => layer.getByRole("button", { name, exact: true });
 const field = (name) => layer.getByRole("textbox", { name, exact: true });
 const settle = (ms = 700) => page.waitForTimeout(ms);
@@ -86,9 +104,19 @@ async function press(name) {
 async function typeInto(name, text) {
   await eventually(async () => (await field(name).count()) === 1);
   await field(name).dispatchEvent("click");
+  // Typing goes to the hidden text area GPUI focuses; wait until it has the focus.
+  await eventually(() => page.evaluate(() => document.activeElement?.tagName === "TEXTAREA"));
   await settle(300);
   await page.keyboard.type(text, { delay: 10 });
   await settle(300);
+  // A single-line field reports what is in it. On a slow machine the first
+  // key can arrive before the field is ready, so check, and type again if not.
+  if ((await field(name).getAttribute("aria-multiline")) === "true" || text === "") return;
+  for (let attempt = 0; attempt < 3 && (await field(name).textContent()) !== text; attempt += 1) {
+    await page.keyboard.press("Control+a");
+    await page.keyboard.type(text, { delay: 25 });
+    await settle(400);
+  }
 }
 const heard = (role) => layer.getByRole(role).allTextContents();
 // Waits for something to become true instead of sleeping a fixed time, so a
@@ -134,7 +162,16 @@ try {
   await openDemo();
   check(await page.locator("#status").isHidden(), "the app started (no failure message)");
   check((await page.locator("body > canvas").getAttribute("aria-hidden")) === "true", "the canvas is hidden from assistive technology");
-  check((await field("GitHub token").count()) === 1, "the token field is exposed as a text field");
+  const token = layer.locator('input[type="password"]');
+  check((await token.count()) === 1 && (await token.getAttribute("aria-label")) === "GitHub token", "the token field is a real password field, named GitHub token");
+  await token.click();
+  await page.keyboard.type("not-a-real-token", { delay: 10 });
+  await settle(500);
+  const exposed = await page.evaluate(() => document.documentElement.outerHTML.includes("not-a-real-token") || [...document.querySelectorAll("textarea")].some((entry) => entry.value.includes("not-a-real-token")));
+  check((await token.inputValue()) === "not-a-real-token" && !exposed, "what is typed there is in the password field and nowhere else on the page");
+  await token.fill("");
+  // Give the keyboard back to the page for the next check.
+  await page.evaluate(() => document.activeElement?.blur());
   await scan("sign-in");
 
   // Keyboard only: Tab to the demo button, see a focus ring, press Enter.
@@ -169,6 +206,7 @@ try {
   // --- Terminal ---
   await press("Terminal");
   await typeInto("Command", "grep -c 'smoke test' app/main.py && git status");
+  check((await field("Command").textContent()) === "grep -c 'smoke test' app/main.py && git status", "a screen reader can read back what is typed in a field");
   await page.keyboard.press("Enter");
   await settle(1500);
   check(await hears("log", (text) => /^1$/m.test(text)), "the terminal sees the edit (grep -c printed 1)");
@@ -251,7 +289,7 @@ try {
 
   // --- Extra keys: the row an on-screen keyboard lacks ---
   await press("More");
-  await press("Extra keys (Esc, Tab, arrows, symbols): shown with the on-screen keyboard. Show always");
+  await press("Extra keys: with the keyboard. Switch to always shown");
   await press("Terminal");
   check(await eventually(async () => (await button("Escape").count()) === 1), "the extra keys show in the terminal once switched on");
   check((await button("Complete").count()) === 0 && (await button("Stop").count()) === 1, "beside them the terminal drops its own Complete, Previous and Next, and keeps Stop");
@@ -380,11 +418,67 @@ try {
   await swipe(8, 240);
   check((await field("Command").count()) === 1, "nor is a swipe from the screen's edge, which is Safari's Back");
   await press("More");
-  await press("Swipe sideways to change pane: on. Turn off");
+  await press("Swipe to change pane: on. Turn off");
   await swipe(120, 320);
-  check((await button("Swipe sideways to change pane: off. Turn on").count()) === 1, "swiping can be switched off, and then a swipe does nothing");
+  check((await button("Swipe to change pane: off. Turn on").count()) === 1, "swiping can be switched off, and then a swipe does nothing");
+
+  // --- Code suggestions, with the stand-in model ---
+  const status = (needle, timeout = 30_000) => eventually(async () => (await heard("status")).some((text) => text.includes(needle)), timeout);
+  check(await status("Code suggestions are off") && await status("downloads it once"), "suggestions start switched off, and the settings say what switching them on costs");
+  await press("Turn code suggestions on");
+  check(await status("This browser has no WebGPU"), "with no WebGPU the settings say so, and offer the CPU");
+  await press("Run suggestions on the CPU");
+  check(await status("is running on the CPU"), "the model loads and reports that it runs on the CPU");
+  await press("Terminal");
+  await runLine("echo > letters.txt && open letters.txt");
+  await typeInto("Code editor, /letters.txt", "abc");
+  check(await status("Suggestion: defghij"), "a pause in typing brings a suggestion (after abc: defghij...)");
+  await page.keyboard.press("ArrowLeft");
+  check(await eventually(async () => (await button("Insert suggestion").count()) === 0), "moving the cursor withdraws it");
+  await page.keyboard.press("ArrowRight");
+  await scan("editor with a suggestion");
+  await press("Insert suggestion");
+  await settle(1500);
+  await press("Terminal");
+  await runLine("clear");
+  await runLine("cat letters.txt");
+  check(await says("abcdefghijklmnopqrstuvwxyz", 15_000), "Insert puts the suggestion into the file");
+  await press("More");
+  await press("Turn code suggestions off and free their memory");
+  check(await status("Code suggestions are off"), "suggestions can be switched off again");
+  await press("Remove the downloaded model for code suggestions");
+  check(await status("was removed from this device"), "and the downloaded model can be removed");
 
   check(errors.length === 0, `no errors in the browser console${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
+
+  // --- The same app on WebGPU: drawing, and the model on the GPU ---
+  await browser.close();
+  errors.length = 0;
+  await launch(softwareWebGpu, { "silver-wombat.suggest": "on" });
+  await openDemo();
+  // Chrome's software WebGPU loses its device as soon as the app starts
+  // drawing. That makes this a test of the recovery: the page notes that
+  // WebGPU drawing failed, reloads once, and draws with WebGL2.
+  check(await eventually(async () => (await page.evaluate(() => localStorage.getItem("silver-wombat.renderer"))) === "webgl", 20_000), "when the WebGPU device is lost, the page switches to WebGL2 and reloads");
+  await button("Try the demo (no account)").waitFor({ state: "attached", timeout: 60_000 });
+  await settle(1500);
+  errors.length = 0;
+  check(await page.evaluate(async () => (await navigator.gpu?.requestAdapter()) != null), "this browser session has WebGPU (a software one)");
+  check((await page.screenshot()).length > 12_000, "after that the app is drawn (the screenshot is not a blank page)");
+  await press("Try the demo (no account)");
+  await press("Terminal");
+  const typeLine = async (line) => {
+    await typeInto("Command", line);
+    await press("Run");
+  };
+  await typeLine("echo > letters.txt && open letters.txt");
+  await typeInto("Code editor, /letters.txt", "klm");
+  check(await eventually(async () => (await heard("status")).some((text) => text.includes("Suggestion: nopqrst")), 60_000), "a suggestion arrives (after klm: nopqrst...)");
+  await press("More");
+  check(await eventually(async () => (await heard("status")).some((text) => text.includes("is running on the GPU (WebGPU)"))), "the model itself runs on WebGPU, in its worker, and the settings say so");
+  check((await button("Try WebGPU drawing again (reloads the page)").count()) === 1, "the settings say drawing fell back to WebGL2 and offer to try WebGPU again");
+  await scan("more, on WebGPU");
+  check(errors.length === 0, `no errors in the browser console after the reload${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
 } catch (error) {
   failures += 1;
   console.log(`FAIL the test stopped: ${error.message.split("\n")[0]}`);

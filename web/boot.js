@@ -22,6 +22,29 @@ function fail(error) {
 window.addEventListener("error", (event) => fail(event.error ?? event.message));
 window.addEventListener("unhandledrejection", (event) => fail(event.reason));
 
+// The app draws with WebGPU where the browser has it, and with WebGL2 where
+// it does not. If WebGPU is there but its device is lost while the app runs,
+// drawing stops for good. So: watch the devices this page creates, and if one
+// is lost, remember to use WebGL2 on this device and reload once. Unsaved
+// work is on the device already and comes back after the reload. More > the
+// drawing setting switches back.
+const RENDERER = "silver-wombat.renderer";
+if (globalThis.GPUAdapter && localStorage.getItem(RENDERER) !== "webgl") {
+  const requestDevice = GPUAdapter.prototype.requestDevice;
+  GPUAdapter.prototype.requestDevice = async function (...options) {
+    const device = await requestDevice.apply(this, options);
+    device.lost.then((lost) => {
+      if (lost.reason === "destroyed" || crashed) return;
+      localStorage.setItem(RENDERER, "webgl");
+      if (sessionStorage.getItem(RENDERER) === null) {
+        sessionStorage.setItem(RENDERER, "reloaded");
+        location.reload();
+      }
+    });
+    return device;
+  };
+}
+
 try {
   const app = await import("./silver_wombat_app.js");
   await app.default();

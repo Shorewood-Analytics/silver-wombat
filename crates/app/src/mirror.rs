@@ -35,6 +35,12 @@ pub enum Role {
     TextField {
         multiline: bool,
     },
+    /// A field for a secret, such as the GitHub token. Unlike everything else
+    /// here this is not a description of something GPUI draws: it is a real
+    /// HTML password field, visible and typed into directly, so the browser
+    /// treats what is typed as a password: not shown, not read aloud by a
+    /// screen reader, not learned by the keyboard. Its action runs on Enter.
+    Secret,
     /// The page title.
     Heading,
     /// The title of the open pane or of a part of it.
@@ -53,6 +59,8 @@ struct Node {
     key: String,
     role: Role,
     label: String,
+    /// For a text field: what is typed in it.
+    value: Option<String>,
     disabled: bool,
     rect: [f32; 4],
     action: Option<Action>,
@@ -63,6 +71,7 @@ struct Node {
 struct Written {
     role: Role,
     label: String,
+    value: Option<String>,
     disabled: bool,
     rect: [i32; 4],
 }
@@ -89,6 +98,35 @@ pub fn mark(
     disabled: bool,
     action: Option<Action>,
 ) -> impl IntoElement {
+    mark_with_value(key, role, label, None, disabled, action)
+}
+
+/// A single-line text field, with what is typed in it so that a screen
+/// reader can read it back. Pass `None` for a field whose content is secret.
+pub fn mark_field(
+    key: impl Into<String>,
+    label: impl Into<String>,
+    value: Option<String>,
+    action: Action,
+) -> impl IntoElement {
+    mark_with_value(
+        key,
+        Role::TextField { multiline: false },
+        label,
+        value,
+        false,
+        Some(action),
+    )
+}
+
+fn mark_with_value(
+    key: impl Into<String>,
+    role: Role,
+    label: impl Into<String>,
+    value: Option<String>,
+    disabled: bool,
+    action: Option<Action>,
+) -> impl IntoElement {
     let key = key.into();
     let label = label.into();
     canvas(
@@ -98,6 +136,7 @@ pub fn mark(
                     key,
                     role,
                     label,
+                    value,
                     disabled,
                     rect: [
                         bounds.origin.x.into(),
@@ -136,6 +175,7 @@ fn tag_for(role: Role) -> &'static str {
     match role {
         Role::Button | Role::Tab { .. } => "button",
         Role::TextField { .. } | Role::Status | Role::Log => "div",
+        Role::Secret => "input",
         Role::Heading => "h1",
         Role::Section => "h2",
         Role::Text => "p",
@@ -172,6 +212,14 @@ fn apply(element: &web_sys::Element, node: &Written) {
             set(element, "aria-label", Some(&node.label));
             set(element, "aria-multiline", multiline.then_some("true"));
         }
+        Role::Secret => {
+            set(element, "type", Some("password"));
+            set(element, "aria-label", Some(&node.label));
+            set(element, "placeholder", Some(&node.label));
+            set(element, "autocomplete", Some("off"));
+            set(element, "autocapitalize", Some("off"));
+            set(element, "spellcheck", Some("false"));
+        }
         Role::Status => set(element, "role", Some("status")),
         Role::Log => {
             set(element, "role", Some("log"));
@@ -181,10 +229,11 @@ fn apply(element: &web_sys::Element, node: &Written) {
     }
     set(element, "disabled", node.disabled.then_some(""));
     set(element, "aria-disabled", node.disabled.then_some("true"));
-    // Buttons and fields are named by `aria-label`; everything else is read
-    // from its text.
+    // Buttons and fields are named by `aria-label`. A field's text is what is
+    // typed in it; everything else is read from its label.
     let text = match node.role {
-        Role::TextField { .. } => "",
+        Role::TextField { .. } => node.value.as_deref().unwrap_or(""),
+        Role::Secret => return,
         _ => node.label.as_str(),
     };
     if element.text_content().as_deref() != Some(text) {
@@ -211,7 +260,12 @@ fn layer() -> Option<Layer> {
             Some("Text entry for the selected field"),
         );
     }
-    let on_click = Closure::<dyn Fn(web_sys::Event)>::new(|event: web_sys::Event| activate(&event));
+    let on_click = Closure::<dyn Fn(web_sys::Event)>::new(|event: web_sys::Event| {
+        // A click in a password field places the cursor; it activates nothing.
+        if !is_secret(&event) {
+            activate(&event);
+        }
+    });
     let _ = container.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
     on_click.forget();
     let on_key = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(|event: web_sys::KeyboardEvent| {
@@ -223,6 +277,8 @@ fn layer() -> Option<Layer> {
         if is_field && matches!(event.key().as_str(), "Enter" | " ") {
             event.prevent_default();
             activate(&event);
+        } else if is_secret(&event) && event.key() == "Enter" {
+            activate(&event);
         }
     });
     let _ = container.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
@@ -232,6 +288,35 @@ fn layer() -> Option<Layer> {
         elements: HashMap::new(),
         order: Vec::new(),
     })
+}
+
+fn is_secret(event: &web_sys::Event) -> bool {
+    event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .is_some()
+}
+
+fn secret_field(key: &str) -> Option<web_sys::HtmlInputElement> {
+    LAYER.with(|slot| {
+        let slot = slot.borrow();
+        let (element, _) = slot.as_ref()?.elements.get(key)?;
+        element.clone().dyn_into().ok()
+    })
+}
+
+/// What is typed in the [`Role::Secret`] field with this key.
+pub fn secret(key: &str) -> String {
+    secret_field(key)
+        .map(|field| field.value())
+        .unwrap_or_default()
+}
+
+/// Empties that field.
+pub fn clear_secret(key: &str) {
+    if let Some(field) = secret_field(key) {
+        field.set_value("");
+    }
 }
 
 fn activate(event: &web_sys::Event) {
@@ -273,6 +358,7 @@ fn write(nodes: Vec<Node>) {
             let written = Written {
                 role: node.role,
                 label: node.label,
+                value: node.value,
                 disabled: node.disabled,
                 rect: node.rect.map(|value| value.round() as i32),
             };

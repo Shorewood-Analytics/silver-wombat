@@ -67,6 +67,22 @@ body > canvas {
   -webkit-user-select: none;
   user-select: none;
 }
+/* The one element here that is real and visible: the password field for the
+   GitHub token. The browser treats what is typed in it as a password. */
+#a11y > input[type="password"] {
+  pointer-events: auto;
+  padding: 0 14px;
+  border: 1px solid #7c88a6;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #e6e8ee;
+  font: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#a11y > input[type="password"]::placeholder {
+  color: #a3abbd;
+}
 /* A keyboard's focus must be visible even though the element is not. */
 #a11y > :focus-visible {
   outline: 3px solid #ffd866;

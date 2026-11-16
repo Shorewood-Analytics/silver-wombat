@@ -1,0 +1,6 @@
+{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "eos_token": "<|endoftext|>",
+  "bos_token": "<|endoftext|>",
+  "unk_token": "<unk>"
+}

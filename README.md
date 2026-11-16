@@ -17,6 +17,7 @@ There is no server: the page talks straight to the GitHub API with your token.
 - Python 3.12, 3.13, 3.14 and 3.15 in that terminal, running in the browser tab. See [Python](#python).
 - **Go to**: type a few letters of a file's name, or of an action, and pick it. Control+K or Command+K with a keyboard attached.
 - A row of extra keys for typing code on a phone, and layouts for a phone, an open iPhone Duo and an iPad Pro. See [Phone and tablet](#phone-and-tablet).
+- Code suggestions from a small language model that runs on the device, on the GPU through WebGPU. Off until switched on. See [Code suggestions](#code-suggestions).
 
 ## Phone and tablet
 
@@ -37,6 +38,19 @@ The iPhone Duo widths are worked out from Apple's published pixel counts at 3x. 
 **Swipe.** A quick sideways swipe moves to the next or previous pane, the same as tapping its tab. It can be switched off in More. Slow drags, swipes from the screen's edge and two-finger gestures are ignored.
 
 **Not yet tried on a device.** All of this is tested in desktop Chrome with a phone-sized window, touch events, an emulated notch and emulated zoom. The on-screen keyboard's behaviour in Safari cannot be emulated there, so the part that moves the interface above the keyboard has not run at all outside unit tests of its arithmetic.
+
+## Code suggestions
+
+More > Turn code suggestions on. After a pause in typing, a suggested end of the line appears under the editor with two buttons, Insert and Dismiss. A screen reader hears the suggestion when it arrives.
+
+- **The model** is [Tiny StarCoder](https://huggingface.co/bigcode/tiny_starcoder_py): 164 million parameters, trained on Python, able to use the code after the cursor as well as before it. Suggestions are offered in `.py` and `.pyi` files only. It is small enough for a phone, and it is a weak model: expect it to finish an obvious line, not to write a function. Its licence is BigCode OpenRAIL-M, which restricts some uses.
+- **It runs on the device**, in a background worker, through [Transformers.js](https://huggingface.co/docs/transformers.js) and ONNX Runtime. On a browser with WebGPU it runs on the GPU. Without WebGPU the settings say so and offer the CPU, which is slower. Code is never sent anywhere.
+- **The download** happens once, when suggestions are switched on: 224 MB on a GPU with 16-bit floats, 320 MB otherwise, from `huggingface.co`. The browser keeps it. The settings show the size before and after, and progress during.
+- **Memory.** The model is loaded the first time it is needed, not when the app opens. Turn code suggestions off ends the worker and gives the memory back. Remove the downloaded model deletes the files.
+- **Another model.** Put a description in `localStorage` under `silver-wombat.suggest-model` (the fields of `Model` in `crates/core/src/complete.rs`, as JSON) to use any text-generation model in Transformers.js's ONNX layout, from any host.
+
+What has been run: the whole path (settings, download, the worker, generation on the CPU and on WebGPU, the offer, Insert) in Chrome with a stand-in model of a few kilobytes. `e2e/model.mjs` loads and runs the real model in Chrome, on software WebGPU and on the CPU; CI runs it and prints what the model suggested and how long it took, without failing the build if the download does.
+**Not run: the real model on an iPhone or iPad.** Whether 224 MB of model fits in Safari's memory on a given phone, and how fast it is there, is unknown until it is tried on one.
 
 ## Python
 
@@ -81,11 +95,12 @@ So the app describes itself: every button, field and piece of text it draws is a
 Checked in Chrome by `e2e/smoke.mjs`, which operates the whole app only through those elements and runs axe on every pane (no WCAG A/AA findings).
 **Not yet checked with VoiceOver, Switch Control or Voice Control on an iPhone.** That needs a real device.
 
+A screen reader can read back what is typed in the single-line fields (command, commit message, repository, finder).
+
 Known gaps: a screen reader hears the end of the terminal output and of a diff, not all of it, and reads the file being edited through GPUI's hidden text area, which holds only the text around the cursor.
 
 ## What does not work yet
 
-- No code completion.
 - Apart from Python, the terminal has no machine behind it. `cargo`, `npm` and other programs answer "not available".
 - Local changes are kept in the browser's origin-private file system (Safari 26 or later; older browsers fall back to `localStorage`, about 5 MB). The app asks the browser not to evict it, but the browser may refuse, so the GitHub checkpoint is the durable copy. More > Export writes all changes to a patch file that `git apply` accepts.
 - GitHub sign-in with a browser redirect is not possible from a static page: GitHub's login endpoints do not allow cross-origin browser requests. A token is the only way in.
@@ -95,6 +110,7 @@ Known gaps: a screen reader hears the end of the terminal output and of a diff, 
 
 Create a fine-grained personal access token at <https://github.com/settings/personal-access-tokens/new> with **Contents: Read and write** on the repositories you want to edit.
 The token is kept in this browser's storage on this device and is sent only to `api.github.com`. Sign out removes it.
+The field it is typed into is a real HTML password field, so the browser treats it as a password: it is not shown, not read aloud by a screen reader, and not learned by the keyboard.
 
 ## Build
 
@@ -115,7 +131,7 @@ rustup toolchain install nightly-2026-10-31 --target wasm32-unknown-unknown --co
 cargo install wasm-bindgen-cli --version 0.2.130 --locked
 ```
 
-Node.js and npm are needed too: the build fetches the Python interpreters from npm, at the versions pinned in `web/python/package-lock.json`.
+Node.js and npm are needed too: the build fetches the Python interpreters and the suggestion model's runtime from npm, at the versions pinned in `web/python/package-lock.json` and `web/ml/package-lock.json`.
 
 Build the site into `dist/` and serve it:
 
@@ -165,7 +181,10 @@ To run the built site in a real browser and operate it end to end (needs Chrome 
 ```sh
 cargo xtask dist
 npm ci --prefix e2e && node e2e/smoke.mjs
+node e2e/model.mjs    # the real suggestion model; downloads about 320 MB
 ```
+
+**Drawing.** GPUI draws with WebGPU where the browser has it and WebGL2 where it does not. Every test here has drawn with WebGL2. The one WebGPU available to the tests, Chrome's software version, loses its device as soon as the app starts drawing; whether that is the software version's fault or the app's is not known, and WebGPU drawing has not been seen working on real hardware either. So the app guards against it: if the WebGPU device is lost, it remembers to use WebGL2 on that device and reloads once (unsaved work is already on the device and comes back). More then says so and offers to try WebGPU again. The test covers that recovery.
 
 The owner (`benpshore`) may push their own work directly to `main` without a PR or passing CI. CI still runs after a push; releases retain their CI gates. Force-push, deletion, and merge commits remain blocked for everyone.
 

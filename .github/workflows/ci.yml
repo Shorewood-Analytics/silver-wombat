@@ -81,7 +81,7 @@ jobs:
       - run: cargo xtask dist
       - name: The site has every file it needs
         run: |
-          for file in index.html boot.js app.css silver_wombat_app.js silver_wombat_app_bg.wasm python-worker.js; do
+          for file in index.html boot.js app.css silver_wombat_app.js silver_wombat_app_bg.wasm python-worker.js complete-worker.js ml/transformers.min.js ml/ort-wasm-simd-threaded.asyncify.mjs ml/ort-wasm-simd-threaded.asyncify.wasm; do
             test -s "dist/$file" || { echo "::error::dist/$file is missing or empty"; exit 1; }
           done
           for version in 3.12 3.13 3.14 3.15; do
@@ -95,11 +95,20 @@ jobs:
       # accessibility layer: demo repository, edit, save states, terminal,
       # commit, reload recovery, keyboard, an axe scan of every pane, and
       # Python 3.12 to 3.15, including downloading numpy from Pyodide's CDN
-      # and a package from PyPI (so this step needs the network).
+      # and a package from PyPI (so this step needs the network). Code
+      # suggestions are tested here with a stand-in model of a few kilobytes.
       - name: Run the site in a browser
         run: |
           npm ci --prefix e2e
           node e2e/smoke.mjs
+      # The real suggestion model, about 320 MB from Hugging Face, loaded and
+      # run in Chrome on software WebGPU and on the CPU. It reports what the
+      # model suggested and how long that took. A failure here is shown but
+      # does not fail the job: it depends on a download from another site.
+      - name: Run the real suggestion model in a browser
+        continue-on-error: true
+        timeout-minutes: 25
+        run: node e2e/model.mjs
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

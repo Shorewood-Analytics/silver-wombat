@@ -161,6 +161,7 @@ fn dist(args: &[String]) -> Result<(), String> {
             .map_err(|error| format!("could not copy {}: {error}", entry.path().display()))?;
     }
     python_runtimes(&root, &out)?;
+    ml_runtime(&root, &out)?;
 
     println!("dist/ is ready ({profile} profile):");
     let mut names: Vec<_> = fs::read_dir(&out)
@@ -248,6 +249,41 @@ fn python_runtimes(root: &Path, out: &Path) -> Result<(), String> {
         }
         println!("  {bytes:>10} bytes  python/{version}/");
     }
+    Ok(())
+}
+
+/// The files of the runtime that runs the code-suggestion model, as paths
+/// under `web/ml/node_modules/`: Transformers.js bundled for a browser, and
+/// the ONNX Runtime build it loads.
+const ML_FILES: [&str; 3] = [
+    "@huggingface/transformers/dist/transformers.min.js",
+    "onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.mjs",
+    "onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm",
+];
+
+/// Copies that runtime into `dist/ml/`, installing it from npm first if it is
+/// not there yet. The model itself is not part of the site.
+fn ml_runtime(root: &Path, out: &Path) -> Result<(), String> {
+    let source = root.join("web").join("ml");
+    let modules = source.join("node_modules");
+    if ML_FILES.iter().any(|file| !modules.join(file).exists()) {
+        run(Command::new("npm")
+            .args(["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix"])
+            .arg(&source))
+        .map_err(|error| {
+            format!("{error}\nThe suggestion model's runtime comes from npm (web/ml/package.json); Node.js and npm are needed to build the site.")
+        })?;
+    }
+    let to = out.join("ml");
+    fs::create_dir_all(&to)
+        .map_err(|error| format!("could not create {}: {error}", to.display()))?;
+    let mut bytes = 0;
+    for file in ML_FILES {
+        let name = Path::new(file).file_name().ok_or("a file with no name")?;
+        bytes += fs::copy(modules.join(file), to.join(name))
+            .map_err(|error| format!("could not copy {file}: {error}"))?;
+    }
+    println!("  {bytes:>10} bytes  ml/");
     Ok(())
 }
 

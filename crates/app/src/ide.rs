@@ -16,6 +16,7 @@ use gpui_kit::{
     relative,
 };
 use silver_wombat_core::Error;
+use silver_wombat_core::complete::{self, Model, Reply};
 use silver_wombat_core::fake::FakeGitHub;
 use silver_wombat_core::github::{GitHub, Repo};
 use silver_wombat_core::python::PythonTool;
@@ -29,13 +30,22 @@ use silver_wombat_core::{palette, path};
 use crate::mirror::{self, Action, Role};
 use crate::platform::{self, FetchHttp, Kept};
 use crate::python::WorkerPython;
+use crate::suggest::SuggestWorker;
 use crate::theme::{self, Look, MONO, SANS};
 
 const KEY_TOKEN: &str = "silver-wombat.token";
+/// The key of the token's password field on the sign-in screen.
+const TOKEN_FIELD: &str = "token";
 const KEY_LOOK: &str = "silver-wombat.look";
 const KEY_MONO: &str = "silver-wombat.mono";
 const KEY_KEYS: &str = "silver-wombat.keys";
 const KEY_SWIPE: &str = "silver-wombat.swipe";
+/// Code suggestions: "on" (GPU only), "cpu" (the CPU is allowed too) or "off".
+const KEY_SUGGEST: &str = "silver-wombat.suggest";
+/// A model description in JSON that replaces the built-in one (see README).
+const KEY_SUGGEST_MODEL: &str = "silver-wombat.suggest-model";
+/// How long typing must pause before a suggestion is asked for.
+const SUGGEST_DELAY: Duration = Duration::from_millis(600);
 /// Wait this long after the last edit before writing to the device.
 const DEVICE_SAVE_DELAY: Duration = Duration::from_millis(400);
 /// Wait this long after the last edit before checkpointing to GitHub.
@@ -113,6 +123,73 @@ struct Finder {
     results: Vec<Found>,
 }
 
+/// Where the suggestion model stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelState {
+    /// Not in memory.
+    Unloaded,
+    /// Being downloaded or started. Bytes so far, and in all.
+    Loading {
+        loaded: u64,
+        total: u64,
+    },
+    Ready {
+        gpu: bool,
+        bytes: u64,
+    },
+    /// This browser has no WebGPU and the CPU has not been allowed.
+    NoGpu,
+    Failed(String),
+}
+
+/// A suggestion on offer, and the place it was made for.
+struct Offer {
+    text: String,
+    file: String,
+    cursor: usize,
+}
+
+/// Code suggestions from a small model run on this device.
+struct Suggest {
+    model: Model,
+    /// The person's setting: suggestions are wanted.
+    wanted: bool,
+    allow_cpu: bool,
+    state: ModelState,
+    worker: Option<SuggestWorker>,
+    next_id: u32,
+    /// The request awaiting an answer: its id, and the file and cursor it is for.
+    asked: Option<(u32, String, usize)>,
+    offer: Option<Offer>,
+    /// Bumped on every edit; a delayed request only goes out if still current.
+    typing: u64,
+}
+
+impl Suggest {
+    fn new() -> Self {
+        let setting = platform::load(KEY_SUGGEST).unwrap_or_default();
+        Self {
+            model: platform::load(KEY_SUGGEST_MODEL)
+                .and_then(|text| Model::from_json(&text))
+                .unwrap_or_else(Model::tiny_starcoder),
+            wanted: setting == "on" || setting == "cpu",
+            allow_cpu: setting == "cpu",
+            state: ModelState::Unloaded,
+            worker: None,
+            next_id: 1,
+            asked: None,
+            offer: None,
+            typing: 0,
+        }
+    }
+
+    fn id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        id
+    }
+}
+
 /// Which text the extra keys act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyTarget {
@@ -167,6 +244,7 @@ pub struct Ide {
     keys_beside_terminal: bool,
     finder: Option<Finder>,
     finder_input: Entity<InputState>,
+    suggest: Suggest,
     busy: bool,
     notice: Option<String>,
     /// Where unsaved work went the last time it was saved on this device.
@@ -177,7 +255,6 @@ pub struct Ide {
     session: Option<Session>,
     repos: Vec<Repo>,
     work: Option<Work>,
-    token_input: Entity<InputState>,
     repo_input: Entity<InputState>,
     command_input: Entity<InputState>,
     commit_input: Entity<InputState>,
@@ -185,6 +262,7 @@ pub struct Ide {
     terminal: Entity<EditorState>,
     diff: Entity<EditorState>,
     editor_subscription: Option<Subscription>,
+    editor_watch: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -233,11 +311,6 @@ fn read_only(window: &mut Window, cx: &mut Context<Ide>, language: &str) -> Enti
 
 impl Ide {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let token_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .placeholder("Paste a GitHub token")
-        });
         let repo_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/name"));
         let command_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Type a command, then Run"));
@@ -250,13 +323,7 @@ impl Ide {
         let diff = read_only(window, cx, "diff");
 
         let subscriptions = Self::watch_inputs(
-            [
-                &token_input,
-                &repo_input,
-                &command_input,
-                &finder_input,
-                &commit_input,
-            ],
+            [&repo_input, &command_input, &finder_input, &commit_input],
             window,
             cx,
         );
@@ -281,6 +348,7 @@ impl Ide {
             keys_beside_terminal: false,
             finder: None,
             finder_input,
+            suggest: Suggest::new(),
             busy: false,
             notice: None,
             kept: None,
@@ -289,7 +357,6 @@ impl Ide {
             session: None,
             repos: Vec::new(),
             work: None,
-            token_input,
             repo_input,
             command_input,
             commit_input,
@@ -297,6 +364,7 @@ impl Ide {
             terminal,
             diff,
             editor_subscription: None,
+            editor_watch: None,
             _subscriptions: subscriptions,
         };
         Self::watch_page(&control_held, window, cx);
@@ -354,26 +422,11 @@ impl Ide {
 
     /// What Enter and typing do in each of the single-line fields.
     fn watch_inputs(
-        [
-            token_input,
-            repo_input,
-            command_input,
-            finder_input,
-            commit_input,
-        ]: [&Entity<InputState>; 5],
+        [repo_input, command_input, finder_input, commit_input]: [&Entity<InputState>; 4],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        vec![
-            cx.subscribe_in(
-                token_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.sign_in(window, cx);
-                    }
-                },
-            ),
+        let mut watching = vec![
             cx.subscribe_in(
                 repo_input,
                 window,
@@ -410,7 +463,13 @@ impl Ide {
                     }
                 },
             ),
-        ]
+        ];
+        // Redraw when a field's text changes, so that what a screen reader is
+        // told is in the field stays true.
+        for field in [repo_input, command_input, finder_input, commit_input] {
+            watching.push(cx.observe(field, |_, _, cx| cx.notify()));
+        }
+        watching
     }
 
     fn fail(&mut self, error: &Error, cx: &mut Context<Self>) {
@@ -428,7 +487,7 @@ impl Ide {
     // ----- Sign-in and repositories -----
 
     fn sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let token = self.token_input.read(cx).value().trim().to_owned();
+        let token = mirror::secret(TOKEN_FIELD).trim().to_owned();
         if token.is_empty() {
             self.notice = Some("Paste a GitHub token first.".to_owned());
             cx.notify();
@@ -452,7 +511,7 @@ impl Ide {
                 Ok::<_, Error>((user, repos))
             }
             .await;
-            this.update_in(cx, |this, window, cx| match result {
+            this.update_in(cx, |this, _, cx| match result {
                 Ok((user, repos)) => {
                     // Only a token GitHub accepted is kept.
                     if let Err(reason) = platform::save(KEY_TOKEN, &token) {
@@ -460,8 +519,7 @@ impl Ide {
                             "Signed in, but the token could not be kept on this device: {reason}"
                         ));
                     }
-                    this.token_input
-                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    mirror::clear_secret(TOKEN_FIELD);
                     this.session = Some(Session {
                         github,
                         login: user.login,
@@ -495,7 +553,7 @@ impl Ide {
         );
     }
 
-    fn sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
         platform::forget(KEY_TOKEN);
         self.session = None;
         self.work = None;
@@ -505,8 +563,7 @@ impl Ide {
             "Signed out. Changes saved on this device are kept and come back when you reopen the repository."
                 .to_owned(),
         );
-        self.token_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        mirror::clear_secret(TOKEN_FIELD);
         cx.notify();
     }
 
@@ -654,9 +711,14 @@ impl Ide {
                         |this, _, event: &InputEvent, window, cx| {
                             if matches!(event, InputEvent::Change) {
                                 this.editor_changed(window, cx);
+                                this.suggest_after_edit(window, cx);
                             }
                         },
                     ));
+                    // Redraw when the cursor moves, so that a suggestion made
+                    // for another place stops being offered.
+                    this.editor_watch = Some(cx.observe(&editor, |_, _, cx| cx.notify()));
+                    this.suggest.offer = None;
                     this.editor = editor;
                     if let Some(work) = &mut this.work {
                         work.open = Some(file);
@@ -1127,6 +1189,379 @@ impl Ide {
         cx.notify();
     }
 
+    // ----- Code suggestions -----
+    //
+    // A small language model run on this device (see `complete` in the core
+    // crate, and `web/complete-worker.js`). It is downloaded only when the
+    // person switches suggestions on, runs in a worker, and is dropped from
+    // memory when they switch them off.
+
+    fn suggest_turn_on(&mut self, allow_cpu: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.suggest.wanted = true;
+        self.suggest.allow_cpu = allow_cpu;
+        let _ = platform::save(KEY_SUGGEST, if allow_cpu { "cpu" } else { "on" });
+        self.suggest_load(window, cx);
+    }
+
+    fn suggest_turn_off(&mut self, cx: &mut Context<Self>) {
+        self.suggest.wanted = false;
+        let _ = platform::save(KEY_SUGGEST, "off");
+        self.suggest_unload(cx);
+    }
+
+    /// Ends the worker, which gives the model's memory back.
+    fn suggest_unload(&mut self, cx: &mut Context<Self>) {
+        self.suggest.worker = None;
+        self.suggest.state = ModelState::Unloaded;
+        self.suggest.asked = None;
+        self.suggest.offer = None;
+        cx.notify();
+    }
+
+    fn suggest_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.suggest.state,
+            ModelState::Loading { .. } | ModelState::Ready { .. }
+        ) {
+            return;
+        }
+        let ide = cx.weak_entity();
+        let handle = window.window_handle();
+        let on_reply = Rc::new(move |reply: Reply| {
+            let ide = ide.clone();
+            crate::with_app(|cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = ide.update(cx, |this, cx| this.suggest_reply(reply, window, cx));
+                });
+            });
+        });
+        match SuggestWorker::start(on_reply) {
+            Ok(worker) => {
+                let id = self.suggest.id();
+                worker.send(&self.suggest.model.load_request(id, self.suggest.allow_cpu));
+                self.suggest.worker = Some(worker);
+                self.suggest.state = ModelState::Loading {
+                    loaded: 0,
+                    total: 0,
+                };
+            }
+            Err(message) => self.suggest.state = ModelState::Failed(message),
+        }
+        cx.notify();
+    }
+
+    fn suggest_reply(&mut self, reply: Reply, window: &mut Window, cx: &mut Context<Self>) {
+        match reply {
+            Reply::Progress { loaded, total } => {
+                if matches!(self.suggest.state, ModelState::Loading { .. }) {
+                    self.suggest.state = ModelState::Loading { loaded, total };
+                }
+            }
+            Reply::Ready { gpu, bytes } => {
+                self.suggest.state = ModelState::Ready { gpu, bytes };
+                // If the person was typing while it loaded, answer that.
+                self.suggest_after_edit(window, cx);
+            }
+            Reply::NoGpu => {
+                self.suggest.worker = None;
+                self.suggest.state = ModelState::NoGpu;
+            }
+            Reply::Failed(message) => {
+                // A failed suggestion is simply not offered. A failure to
+                // load, or the worker dying, ends the worker.
+                if self.suggest.asked.take().is_none()
+                    || !matches!(self.suggest.state, ModelState::Ready { .. })
+                {
+                    self.suggest.worker = None;
+                    self.suggest.state = ModelState::Failed(message);
+                }
+            }
+            Reply::Text { id, text, stopped } => {
+                let Some((asked, file, cursor)) = self.suggest.asked.clone() else {
+                    return;
+                };
+                if asked != id {
+                    return;
+                }
+                self.suggest.asked = None;
+                let open = self.work.as_ref().and_then(|work| work.open.clone());
+                let editor = self.editor.read(cx);
+                // Only for the place it was asked about, if nothing has moved.
+                if stopped || open.as_deref() != Some(file.as_str()) || editor.cursor() != cursor {
+                    return;
+                }
+                let value = editor.value();
+                let after = value.get(cursor..).unwrap_or("");
+                self.suggest.offer =
+                    complete::suggestion(&text, after).map(|text| Offer { text, file, cursor });
+            }
+            Reply::Done => {}
+        }
+        cx.notify();
+    }
+
+    /// Called after every edit: withdraws the current offer and, once typing
+    /// pauses, asks for a new one.
+    fn suggest_after_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.suggest.offer = None;
+        self.suggest.typing += 1;
+        let Some(file) = self.work.as_ref().and_then(|work| work.open.clone()) else {
+            return;
+        };
+        if !self.suggest.wanted || !self.suggest.model.suits(&file) {
+            return;
+        }
+        // The model is brought into memory the first time it is needed, not
+        // when the app opens.
+        if self.suggest.state == ModelState::Unloaded {
+            self.suggest_load(window, cx);
+        }
+        let typing = self.suggest.typing;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(SUGGEST_DELAY).await;
+            this.update_in(cx, |this, _, cx| {
+                if this.suggest.typing == typing {
+                    this.suggest_ask(file, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn suggest_ask(&mut self, file: String, cx: &mut Context<Self>) {
+        if !matches!(self.suggest.state, ModelState::Ready { .. }) {
+            return;
+        }
+        let editor = self.editor.read(cx);
+        let cursor = editor.cursor();
+        let Some(prompt) = self.suggest.model.prompt(&editor.value(), cursor) else {
+            return;
+        };
+        let id = self.suggest.id();
+        if let Some(worker) = &self.suggest.worker {
+            worker.send(&complete::complete_request(id, &prompt));
+            self.suggest.asked = Some((id, file, cursor));
+        }
+    }
+
+    /// The offer, if it still fits where the cursor is.
+    fn current_offer(&self, cx: &App) -> Option<&Offer> {
+        let offer = self.suggest.offer.as_ref()?;
+        let open = self.work.as_ref()?.open.as_deref()?;
+        (open == offer.file && self.editor.read(cx).cursor() == offer.cursor).then_some(offer)
+    }
+
+    fn suggest_insert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.current_offer(cx).map(|offer| offer.text.clone()) else {
+            return;
+        };
+        self.suggest.offer = None;
+        self.editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            editor.insert(text, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn suggest_forget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.suggest_unload(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = platform::forget_model().await;
+            this.update_in(cx, |this, _, cx| {
+                this.notice = Some(match result {
+                    Ok(true) => {
+                        "The downloaded suggestion model was removed from this device.".to_owned()
+                    }
+                    Ok(false) => "There was no downloaded suggestion model to remove.".to_owned(),
+                    Err(message) => format!("The suggestion model could not be removed: {message}"),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The offer and its two buttons, shown under the editor.
+    fn suggest_bar(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        let text = self.current_offer(cx)?.text.clone();
+        // On one line: a suggested line break is drawn as a return sign.
+        let shown = format!("Suggestion: {}", text.replace('\n', "\u{21b5} "));
+        Some(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .child(
+                    Self::say("suggestion", Role::Status, shown)
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(MONO),
+                )
+                .child(Self::tap(
+                    cx,
+                    Tap::new("suggest-insert", "Insert")
+                        .named("Insert suggestion")
+                        .primary(),
+                    Self::suggest_insert,
+                ))
+                .child(Self::tap(
+                    cx,
+                    Tap::new("suggest-dismiss", "Dismiss")
+                        .named("Dismiss suggestion")
+                        .ghost(),
+                    |this, _, cx| {
+                        this.suggest.offer = None;
+                        cx.notify();
+                    },
+                )),
+        )
+    }
+
+    /// The settings for the extra keys and for swiping.
+    fn touch_settings(&mut self, cx: &mut Context<Self>) -> [Div; 2] {
+        [
+            Self::tap(
+                cx,
+                // The visible label is short enough for a phone; the name
+                // assistive technology reads adds what activating it does.
+                if self.keys_always {
+                    Tap::new("keys", "Extra keys: always shown").named(
+                        "Extra keys: always shown. Switch to only with the on-screen keyboard",
+                    )
+                } else {
+                    Tap::new("keys", "Extra keys: with the keyboard")
+                        .named("Extra keys: with the keyboard. Switch to always shown")
+                },
+                |this, _, cx| this.toggle_keys(cx),
+            ),
+            Self::tap(
+                cx,
+                if self.swipes {
+                    Tap::new("swipes", "Swipe to change pane: on")
+                        .named("Swipe to change pane: on. Turn off")
+                } else {
+                    Tap::new("swipes", "Swipe to change pane: off")
+                        .named("Swipe to change pane: off. Turn on")
+                },
+                |this, _, cx| this.toggle_swipes(cx),
+            ),
+        ]
+    }
+
+    /// Shown only where WebGPU drawing failed and the app fell back to
+    /// WebGL2 (see `web/boot.js`): says so, and offers the way back.
+    fn renderer_settings(cx: &mut Context<Self>) -> Option<Div> {
+        (platform::load(platform::KEY_RENDERER).as_deref() == Some("webgl")).then(|| {
+            v_flex()
+                .gap_3()
+                .child(Self::say(
+                    "renderer",
+                    Role::Text,
+                    "Drawing uses WebGL2 on this device, because WebGPU drawing stopped working here once.",
+                ))
+                .child(Self::tap(
+                    cx,
+                    Tap::new("renderer-retry", "Try WebGPU drawing again")
+                        .named("Try WebGPU drawing again (reloads the page)"),
+                    |_, _, _| platform::retry_webgpu(),
+                ))
+        })
+    }
+
+    /// The settings for suggestions: what they cost, where the model stands,
+    /// and the way to switch them off and get the memory and storage back.
+    fn suggest_settings(&mut self, cx: &mut Context<Self>) -> Vec<Div> {
+        let model = &self.suggest.model;
+        let name = model.name.clone();
+        let sizes = if model.megabytes_gpu_f16 == model.megabytes_gpu {
+            format!("about {} MB", model.megabytes_gpu)
+        } else {
+            format!(
+                "{} or {} MB, depending on the device",
+                model.megabytes_gpu_f16, model.megabytes_gpu
+            )
+        };
+        let cpu_megabytes = model.megabytes_cpu;
+        let only = if model.extensions.is_empty() {
+            String::new()
+        } else {
+            format!(" Offered in .{} files.", model.extensions.join(" and ."))
+        };
+        let mut rows = Vec::new();
+        let note = match &self.suggest.state {
+            _ if !self.suggest.wanted => format!(
+                "Code suggestions are off. They come from a small model, {name}, that runs on this device. Switching them on downloads it once: {sizes}.{only}"
+            ),
+            ModelState::Unloaded => format!(
+                "Code suggestions are on. The model, {name}, is loaded when you next edit a file it is for.{only}"
+            ),
+            ModelState::Loading { total: 0, .. } => {
+                "Getting the suggestion model ready.".to_owned()
+            }
+            ModelState::Loading { loaded, total } => format!(
+                "Getting the suggestion model: {} of {} MB.",
+                complete::megabytes(*loaded),
+                complete::megabytes(*total)
+            ),
+            ModelState::Ready { gpu, bytes } => format!(
+                "Code suggestions are on. {name} ({} MB) is running on {}.{only}",
+                complete::megabytes(*bytes),
+                if *gpu {
+                    "the GPU (WebGPU)"
+                } else {
+                    "the CPU, which is slower"
+                }
+            ),
+            ModelState::NoGpu => format!(
+                "This browser has no WebGPU, so the suggestion model cannot run on the GPU. It can run on the CPU instead: slower, and a download of about {cpu_megabytes} MB."
+            ),
+            ModelState::Failed(message) => {
+                format!("The suggestion model could not be started: {message}")
+            }
+        };
+        rows.push(Self::say("suggest-note", Role::Status, note));
+        rows.push(match (&self.suggest.state, self.suggest.wanted) {
+            (ModelState::NoGpu, _) => Self::tap(
+                cx,
+                Tap::new("suggest-cpu", "Run suggestions on the CPU"),
+                |this, window, cx| this.suggest_turn_on(true, window, cx),
+            ),
+            (ModelState::Failed(_), true) => Self::tap(
+                cx,
+                Tap::new("suggest-retry", "Try again"),
+                |this, window, cx| {
+                    let allow_cpu = this.suggest.allow_cpu;
+                    this.suggest_turn_on(allow_cpu, window, cx);
+                },
+            ),
+            (_, true) => Self::tap(
+                cx,
+                Tap::new("suggest-off", "Turn code suggestions off")
+                    .named("Turn code suggestions off and free their memory"),
+                |this, _, cx| this.suggest_turn_off(cx),
+            ),
+            (_, false) => Self::tap(
+                cx,
+                Tap::new("suggest-on", "Turn code suggestions on"),
+                |this, window, cx| this.suggest_turn_on(false, window, cx),
+            ),
+        });
+        rows.push(Self::tap(
+            cx,
+            Tap::new("suggest-forget", "Remove the downloaded model")
+                .named("Remove the downloaded model for code suggestions")
+                .ghost(),
+            Self::suggest_forget,
+        ));
+        rows
+    }
+
     // ----- Finder -----
     //
     // "Go to": type a few letters of a file's name, or of an action, and
@@ -1268,7 +1703,13 @@ impl Ide {
                 h_flex()
                     .gap_2()
                     .child(
-                        Self::field("finder", "Find a file or action", &self.finder_input).flex_1(),
+                        Self::field(
+                            "finder",
+                            "Find a file or action",
+                            &self.finder_input,
+                            Self::typed(&self.finder_input, cx),
+                        )
+                        .flex_1(),
                     )
                     .child(Self::tap(
                         cx,
@@ -1522,7 +1963,30 @@ impl Ide {
             ))
     }
 
-    fn field(key: &str, label: &str, state: &Entity<InputState>) -> Div {
+    /// A field for a secret: a real HTML password field placed here (see
+    /// `mirror::Role::Secret`). `on_enter` runs when Enter is pressed in it.
+    fn secret(
+        cx: &mut Context<Self>,
+        key: &str,
+        label: &str,
+        on_enter: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Div {
+        let entity = cx.entity().downgrade();
+        let action: Action = Rc::new(move |window: &mut Window, cx: &mut App| {
+            let _ = entity.update(cx, |this, cx| on_enter(this, window, cx));
+        });
+        div().relative().h(px(TAP)).child(mirror::mark(
+            key,
+            Role::Secret,
+            label,
+            false,
+            Some(action),
+        ))
+    }
+
+    /// A single-line text field. `typed` is its content for a screen reader
+    /// to read back.
+    fn field(key: &str, label: &str, state: &Entity<InputState>, typed: String) -> Div {
         let target = state.clone();
         let action: Action = Rc::new(move |window: &mut Window, cx: &mut App| {
             target.update(cx, |input, cx| input.focus(window, cx));
@@ -1530,13 +1994,11 @@ impl Ide {
         div()
             .relative()
             .child(Input::new(state).large().h(px(TAP)))
-            .child(mirror::mark(
-                key,
-                Role::TextField { multiline: false },
-                label,
-                false,
-                Some(action),
-            ))
+            .child(mirror::mark_field(key, label, Some(typed), action))
+    }
+
+    fn typed(state: &Entity<InputState>, cx: &App) -> String {
+        state.read(cx).value().to_string()
     }
 
     /// An editor that fills the space it is given.
@@ -1617,7 +2079,7 @@ impl Ide {
                 v_flex()
                     .gap_2()
                     .child("GitHub token")
-                    .child(Self::field("token", "GitHub token", &self.token_input))
+                    .child(Self::secret(cx, TOKEN_FIELD, "GitHub token", Self::sign_in))
                     .child(Self::tap(
                         cx,
                         Tap::new("sign-in", if self.busy { "Signing in…" } else { "Sign in" })
@@ -1686,8 +2148,8 @@ impl Ide {
                     .child(Self::tap(
                         cx,
                         Tap::new("sign-out", "Sign out"),
-                        |this, window, cx| {
-                            this.sign_out(window, cx);
+                        |this, _, cx| {
+                            this.sign_out(cx);
                         },
                     )),
             )
@@ -1696,8 +2158,13 @@ impl Ide {
                 h_flex()
                     .gap_2()
                     .child(
-                        Self::field("repo-name", "Repository, as owner/name", &self.repo_input)
-                            .flex_1(),
+                        Self::field(
+                            "repo-name",
+                            "Repository, as owner/name",
+                            &self.repo_input,
+                            Self::typed(&self.repo_input, cx),
+                        )
+                        .flex_1(),
                     )
                     .child(Self::tap(
                         cx,
@@ -1846,6 +2313,7 @@ impl Ide {
                 &self.editor,
                 if self.mono { MONO } else { SANS },
             ))
+            .children(self.suggest_bar(cx))
             .into_any_element()
     }
 
@@ -1893,7 +2361,15 @@ impl Ide {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(Self::field("command", "Command", &self.command_input).flex_1())
+                            .child(
+                                Self::field(
+                                    "command",
+                                    "Command",
+                                    &self.command_input,
+                                    Self::typed(&self.command_input, cx),
+                                )
+                                .flex_1(),
+                            )
                             .child(Self::tap(
                                 cx,
                                 Tap::new("run", if busy { "Running…" } else { "Run" })
@@ -2069,7 +2545,12 @@ impl Ide {
                 v_flex()
                     .gap_2()
                     .child("Commit message")
-                    .child(Self::field("commit-message", "Commit message", &self.commit_input))
+                    .child(Self::field(
+                        "commit-message",
+                        "Commit message",
+                        &self.commit_input,
+                        Self::typed(&self.commit_input, cx),
+                    ))
                     .child(
                         h_flex()
                             .gap_2()
@@ -2121,7 +2602,9 @@ impl Ide {
             None => String::new(),
         };
         v_flex()
+            .id("settings")
             .size_full()
+            .overflow_y_scroll()
             .p_4()
             .gap_3()
             .child(Self::say(
@@ -2157,30 +2640,9 @@ impl Ide {
                 ),
                 |this, _, cx| this.toggle_mono(cx),
             ))
-            .child(Self::tap(
-                cx,
-                Tap::new(
-                    "keys",
-                    if self.keys_always {
-                        "Extra keys (Esc, Tab, arrows, symbols): always shown. Show only with the on-screen keyboard"
-                    } else {
-                        "Extra keys (Esc, Tab, arrows, symbols): shown with the on-screen keyboard. Show always"
-                    },
-                ),
-                |this, _, cx| this.toggle_keys(cx),
-            ))
-            .child(Self::tap(
-                cx,
-                Tap::new(
-                    "swipes",
-                    if self.swipes {
-                        "Swipe sideways to change pane: on. Turn off"
-                    } else {
-                        "Swipe sideways to change pane: off. Turn on"
-                    },
-                ),
-                |this, _, cx| this.toggle_swipes(cx),
-            ))
+            .children(self.touch_settings(cx))
+            .children(self.suggest_settings(cx))
+            .children(Self::renderer_settings(cx))
             .child(Self::say("storage", Role::Text, self.storage_note()))
             .child(Self::tap(
                 cx,
@@ -2203,8 +2665,8 @@ impl Ide {
             .child(Self::tap(
                 cx,
                 Tap::new("sign-out-more", "Sign out"),
-                |this, window, cx| {
-                    this.sign_out(window, cx);
+                |this, _, cx| {
+                    this.sign_out(cx);
                 },
             ))
             .into_any_element()
@@ -2328,7 +2790,9 @@ impl Ide {
                     cx,
                     Tap::new(format!("tab-{}", tab.label()), tab.label())
                         .tab(tab == current)
-                        .tiny(width < 360.0),
+                        // Five tabs share a phone's width; smaller type keeps
+                        // every name whole.
+                        .tiny(layout == Layout::Compact),
                     move |this, _, cx| {
                         this.pane = tab;
                         if tab.is_side() {

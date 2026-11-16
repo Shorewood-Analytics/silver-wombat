@@ -5852,6 +5852,7 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "gpui-kit",
+ "gpui-pre-web",
  "js-sys",
  "serde_json",
  "silver-wombat-core",

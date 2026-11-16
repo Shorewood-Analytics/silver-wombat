@@ -6,10 +6,12 @@ mod ide;
 mod mirror;
 mod platform;
 mod python;
+mod suggest;
 mod theme;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use gpui_kit::{App, ApplicationHandle, WindowOptions};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -68,6 +70,14 @@ fn show_crashes_on_the_page() {
 pub fn run() {
     show_crashes_on_the_page();
     gpui_kit::platform::web_init();
-    let handle = gpui_kit::platform::single_threaded_web().run_embedded(launch);
+    // WebGPU where the browser has it, else WebGL2; or WebGL2 outright on a
+    // device where WebGPU has failed before (see `web/boot.js`).
+    let backend = if platform::load(platform::KEY_RENDERER).as_deref() == Some("webgl") {
+        gpui_web::WebBackendPreference::WebGl
+    } else {
+        gpui_web::WebBackendPreference::Auto
+    };
+    let web = Rc::new(gpui_web::WebPlatform::new_with_backend(false, backend));
+    let handle = gpui_kit::Application::with_platform(web).run_embedded(launch);
     APPLICATION.with(|application| *application.borrow_mut() = Some(handle));
 }

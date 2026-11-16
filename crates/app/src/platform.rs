@@ -9,6 +9,37 @@ use wasm_bindgen_futures::JsFuture;
 
 const API: &str = "https://api.github.com";
 
+/// Set to "webgl" by `web/boot.js` when WebGPU drawing has failed on this
+/// device, so that the app starts on WebGL2 from then on.
+pub const KEY_RENDERER: &str = "silver-wombat.renderer";
+
+/// Forgets that WebGPU drawing failed on this device and reloads the page to
+/// try it again. If it fails again, `web/boot.js` falls back as before.
+pub fn retry_webgpu() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    forget(KEY_RENDERER);
+    if let Ok(Some(session)) = window.session_storage() {
+        let _ = session.remove_item(KEY_RENDERER);
+    }
+    let _ = window.location().reload();
+}
+
+/// Deletes the suggestion model's downloaded files from the browser's cache.
+/// `Ok(true)` if there was something to delete.
+pub async fn forget_model() -> Result<bool, String> {
+    let caches = web_sys::window()
+        .ok_or("no window")?
+        .caches()
+        .map_err(|error| describe(&error))?;
+    // The name Transformers.js gives its cache (`env.cacheKey`).
+    let deleted = JsFuture::from(caches.delete("transformers-cache"))
+        .await
+        .map_err(|error| describe(&error))?;
+    Ok(deleted.as_bool().unwrap_or(false))
+}
+
 /// Whether the person has pinch-zoomed the page. Zooming and an on-screen
 /// keyboard both shrink what the browser calls the visual viewport, and only
 /// the keyboard should make the interface rearrange itself: someone who zooms

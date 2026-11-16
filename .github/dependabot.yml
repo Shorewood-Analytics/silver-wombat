@@ -38,3 +38,13 @@ updates:
     groups:
       python-runtimes:
         patterns: ["*"]
+  # The runtime for the code-suggestion model (Transformers.js, ONNX Runtime).
+  - package-ecosystem: npm
+    directory: /web/ml
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      ml-runtime:
+        patterns: ["*"]

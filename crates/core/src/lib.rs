@@ -9,6 +9,7 @@
 // once on the type; repeating them under each function would add nothing.
 #![allow(clippy::missing_errors_doc)]
 
+pub mod complete;
 pub mod diff;
 pub mod error;
 pub mod fake;
