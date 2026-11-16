@@ -40,6 +40,36 @@ pub struct Model {
     pub extensions: Vec<String>,
 }
 
+/// Which processor the person has agreed the model may run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Processor {
+    /// The GPU only. Without WebGPU the model is not loaded.
+    Gpu,
+    /// The GPU if the browser has WebGPU, the CPU if not.
+    GpuOrCpu,
+    /// The CPU, even where there is a GPU: for when the GPU failed.
+    Cpu,
+}
+
+impl Processor {
+    /// The word for this in a load request and in the saved setting.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gpu => "gpu",
+            Self::GpuOrCpu => "any",
+            Self::Cpu => "cpu",
+        }
+    }
+
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Gpu, Self::GpuOrCpu, Self::Cpu]
+            .into_iter()
+            .find(|processor| processor.name() == name)
+    }
+}
+
 impl Model {
     /// The model used unless another is configured: Tiny `StarCoder`, 164
     /// million parameters, trained on Python and able to fill in the middle.
@@ -78,7 +108,7 @@ impl Model {
 
     /// The request that loads this model, as JSON for the worker.
     #[must_use]
-    pub fn load_request(&self, id: u32, allow_cpu: bool) -> String {
+    pub fn load_request(&self, id: u32, processor: Processor) -> String {
         serde_json::json!({
             "id": id,
             "load": {
@@ -87,7 +117,7 @@ impl Model {
                 "gpu_f16": self.gpu_f16,
                 "gpu": self.gpu,
                 "cpu": self.cpu,
-                "allow_cpu": allow_cpu,
+                "processor": processor.name(),
             },
         })
         .to_string()
@@ -351,13 +381,24 @@ mod tests {
     }
 
     #[test]
+    fn a_processor_is_saved_and_read_back_by_name() {
+        for processor in [Processor::Gpu, Processor::GpuOrCpu, Processor::Cpu] {
+            assert_eq!(Processor::named(processor.name()), Some(processor));
+        }
+        assert_eq!(Processor::named("on"), None);
+        let request: serde_json::Value =
+            serde_json::from_str(&Model::tiny_starcoder().load_request(1, Processor::Cpu)).unwrap();
+        assert_eq!(request["load"]["processor"], "cpu");
+    }
+
+    #[test]
     fn requests_and_replies() {
         let request: serde_json::Value =
-            serde_json::from_str(&Model::tiny_starcoder().load_request(7, false)).unwrap();
+            serde_json::from_str(&Model::tiny_starcoder().load_request(7, Processor::Gpu)).unwrap();
         assert_eq!(request["id"], 7);
         assert_eq!(request["load"]["repo"], "Xenova/tiny_starcoder_py");
         assert_eq!(request["load"]["gpu_f16"], "q4f16");
-        assert_eq!(request["load"]["allow_cpu"], false);
+        assert_eq!(request["load"]["processor"], "gpu");
         let request: serde_json::Value =
             serde_json::from_str(&complete_request(8, "x = ")).unwrap();
         assert_eq!(request["complete"]["prompt"], "x = ");

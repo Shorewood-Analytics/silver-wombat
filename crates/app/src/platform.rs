@@ -311,12 +311,21 @@ pub fn forget(key: &str) {
 // which is limited to about 5 MB.
 
 /// Where unsaved work is being kept on this device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kept {
     /// The origin-private file system.
     Files,
-    /// `localStorage`, the small fallback.
-    Small,
+    /// `localStorage`, the small fallback, and why file storage was not used.
+    Small(String),
+}
+
+/// A browser error with its name, which for storage errors says more than
+/// the message does (`NotAllowedError`, `QuotaExceededError`).
+fn describe_named(value: &JsValue) -> String {
+    match value.dyn_ref::<js_sys::Error>() {
+        Some(error) => format!("{}: {}", error.name(), error.message()),
+        None => describe(value),
+    }
 }
 
 fn file_name(key: &str) -> String {
@@ -380,17 +389,18 @@ pub async fn keep(key: &str, text: &str) -> Result<Kept, String> {
             forget(&last_moment_key(key));
             Ok(Kept::Files)
         }
-        Err(files_error) => save(key, text)
-            .map(|()| {
-                forget(&last_moment_key(key));
-                Kept::Small
-            })
-            .map_err(|small_error| {
-                format!(
-                    "file storage: {}; fallback storage: {small_error}",
-                    describe(&files_error)
-                )
-            }),
+        Err(files_error) => {
+            let why = describe_named(&files_error);
+            match save(key, text) {
+                Ok(()) => {
+                    forget(&last_moment_key(key));
+                    Ok(Kept::Small(why))
+                }
+                Err(small_error) => Err(format!(
+                    "file storage: {why}; fallback storage: {small_error}"
+                )),
+            }
+        }
     }
 }
 
@@ -507,15 +517,17 @@ pub async fn read_picked(
     read
 }
 
-/// Reads back unsaved work kept by [`keep`] or [`keep_now`], and says where
-/// it was found.
-pub async fn recall(key: &str) -> Option<(String, Kept)> {
+/// Reads back unsaved work kept by [`keep`] or [`keep_now`]. Also says where
+/// saves go, when finding it showed that: work found in file storage means
+/// file storage works. Work found in the small store does not say why it was
+/// there, so the next save has to.
+pub async fn recall(key: &str) -> Option<(String, Option<Kept>)> {
     if let Some(text) = load(&last_moment_key(key)) {
-        return Some((text, Kept::Small));
+        return Some((text, None));
     }
     match read_file(key).await {
-        Ok(text) => Some((text, Kept::Files)),
-        Err(_) => load(key).map(|text| (text, Kept::Small)),
+        Ok(text) => Some((text, Some(Kept::Files))),
+        Err(_) => load(key).map(|text| (text, None)),
     }
 }
 

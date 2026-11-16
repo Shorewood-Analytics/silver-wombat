@@ -16,7 +16,7 @@ use gpui_kit::{
     relative,
 };
 use silver_wombat_core::Error;
-use silver_wombat_core::complete::{self, Model, Reply};
+use silver_wombat_core::complete::{self, Model, Processor, Reply};
 use silver_wombat_core::fake::FakeGitHub;
 use silver_wombat_core::github::{GitHub, Repo};
 use silver_wombat_core::python::PythonTool;
@@ -41,8 +41,11 @@ const KEY_LOOK: &str = "silver-wombat.look";
 const KEY_MONO: &str = "silver-wombat.mono";
 const KEY_KEYS: &str = "silver-wombat.keys";
 const KEY_SWIPE: &str = "silver-wombat.swipe";
-/// Code suggestions: "on" (GPU only), "cpu" (the CPU is allowed too) or "off".
+/// Code suggestions: "off", or where the model may run (a `Processor` name).
 const KEY_SUGGEST: &str = "silver-wombat.suggest";
+/// Present while the suggestion model is loading. If it is still there when
+/// the app starts, the last load never finished.
+const KEY_SUGGEST_LOADING: &str = "silver-wombat.suggest-loading";
 /// A model description in JSON that replaces the built-in one (see README).
 const KEY_SUGGEST_MODEL: &str = "silver-wombat.suggest-model";
 /// How long typing must pause before a suggestion is asked for.
@@ -141,6 +144,10 @@ enum ModelState {
     /// This browser has no WebGPU and the CPU has not been allowed.
     NoGpu,
     Failed(String),
+    /// The last load never finished: the page was closed, or the browser
+    /// ended it, while the model was loading. It is not tried again unasked,
+    /// because a model too big for the device would end the page every time.
+    Interrupted,
 }
 
 /// A suggestion on offer, and the place it was made for.
@@ -155,7 +162,7 @@ struct Suggest {
     model: Model,
     /// The person's setting: suggestions are wanted.
     wanted: bool,
-    allow_cpu: bool,
+    processor: Processor,
     state: ModelState,
     worker: Option<SuggestWorker>,
     next_id: u32,
@@ -168,14 +175,20 @@ struct Suggest {
 
 impl Suggest {
     fn new() -> Self {
-        let setting = platform::load(KEY_SUGGEST).unwrap_or_default();
+        let processor = platform::load(KEY_SUGGEST).and_then(|name| Processor::named(&name));
+        let interrupted = processor.is_some() && platform::load(KEY_SUGGEST_LOADING).is_some();
+        platform::forget(KEY_SUGGEST_LOADING);
         Self {
             model: platform::load(KEY_SUGGEST_MODEL)
                 .and_then(|text| Model::from_json(&text))
                 .unwrap_or_else(Model::tiny_starcoder),
-            wanted: setting == "on" || setting == "cpu",
-            allow_cpu: setting == "cpu",
-            state: ModelState::Unloaded,
+            wanted: processor.is_some(),
+            processor: processor.unwrap_or(Processor::Gpu),
+            state: if interrupted {
+                ModelState::Interrupted
+            } else {
+                ModelState::Unloaded
+            },
             worker: None,
             next_id: 1,
             asked: None,
@@ -396,7 +409,6 @@ impl Ide {
             Ok(()) => {
                 work.workspace.mark_on_device(revision);
                 work.device_error = None;
-                self.kept = Some(Kept::Small);
             }
             Err(reason) => work.device_error = Some(reason),
         }
@@ -708,7 +720,7 @@ impl Ide {
                 {
                     // Saved changes that cannot be read are reported, not dropped silently.
                     restored = workspace.import_drafts(&saved)?;
-                    found_in = Some(place);
+                    found_in = place;
                 }
                 let entries = workspace.list_dir("").await?;
                 Ok::<_, Error>((workspace, restored, found_in, entries))
@@ -913,7 +925,7 @@ impl Ide {
                             // Only now is it true that the device has the changes.
                             workspace.mark_on_device(revision);
                             work.device_error = None;
-                            this.kept = Some(*place);
+                            this.kept = Some(place.clone());
                         }
                         Err(reason) => work.device_error = Some(reason.clone()),
                     }
@@ -1409,10 +1421,15 @@ impl Ide {
     // person switches suggestions on, runs in a worker, and is dropped from
     // memory when they switch them off.
 
-    fn suggest_turn_on(&mut self, allow_cpu: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn suggest_turn_on(
+        &mut self,
+        processor: Processor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.suggest.wanted = true;
-        self.suggest.allow_cpu = allow_cpu;
-        let _ = platform::save(KEY_SUGGEST, if allow_cpu { "cpu" } else { "on" });
+        self.suggest.processor = processor;
+        let _ = platform::save(KEY_SUGGEST, processor.name());
         self.suggest_load(window, cx);
     }
 
@@ -1425,6 +1442,7 @@ impl Ide {
     /// Ends the worker, which gives the model's memory back.
     fn suggest_unload(&mut self, cx: &mut Context<Self>) {
         self.suggest.worker = None;
+        platform::forget(KEY_SUGGEST_LOADING);
         self.suggest.state = ModelState::Unloaded;
         self.suggest.asked = None;
         self.suggest.offer = None;
@@ -1451,8 +1469,9 @@ impl Ide {
         match SuggestWorker::start(on_reply) {
             Ok(worker) => {
                 let id = self.suggest.id();
-                worker.send(&self.suggest.model.load_request(id, self.suggest.allow_cpu));
+                worker.send(&self.suggest.model.load_request(id, self.suggest.processor));
                 self.suggest.worker = Some(worker);
+                let _ = platform::save(KEY_SUGGEST_LOADING, "1");
                 self.suggest.state = ModelState::Loading {
                     loaded: 0,
                     total: 0,
@@ -1464,6 +1483,12 @@ impl Ide {
     }
 
     fn suggest_reply(&mut self, reply: Reply, window: &mut Window, cx: &mut Context<Self>) {
+        // Any answer but progress means the load is over, one way or the other.
+        if matches!(self.suggest.state, ModelState::Loading { .. })
+            && !matches!(reply, Reply::Progress { .. })
+        {
+            platform::forget(KEY_SUGGEST_LOADING);
+        }
         match reply {
             Reply::Progress { loaded, total } => {
                 if matches!(self.suggest.state, ModelState::Loading { .. }) {
@@ -1737,34 +1762,10 @@ impl Ide {
             ModelState::Failed(message) => {
                 format!("The suggestion model could not be started: {message}")
             }
+            ModelState::Interrupted => "The suggestion model was not started. Last time, the page closed while it was loading. If that was the browser running out of memory, it is likely to happen again.".to_owned(),
         };
         rows.push(Self::say("suggest-note", Role::Status, note));
-        rows.push(match (&self.suggest.state, self.suggest.wanted) {
-            (ModelState::NoGpu, _) => Self::tap(
-                cx,
-                Tap::new("suggest-cpu", "Run suggestions on the CPU"),
-                |this, window, cx| this.suggest_turn_on(true, window, cx),
-            ),
-            (ModelState::Failed(_), true) => Self::tap(
-                cx,
-                Tap::new("suggest-retry", "Try again"),
-                |this, window, cx| {
-                    let allow_cpu = this.suggest.allow_cpu;
-                    this.suggest_turn_on(allow_cpu, window, cx);
-                },
-            ),
-            (_, true) => Self::tap(
-                cx,
-                Tap::new("suggest-off", "Turn code suggestions off")
-                    .named("Turn code suggestions off and free their memory"),
-                |this, _, cx| this.suggest_turn_off(cx),
-            ),
-            (_, false) => Self::tap(
-                cx,
-                Tap::new("suggest-on", "Turn code suggestions on"),
-                |this, window, cx| this.suggest_turn_on(false, window, cx),
-            ),
-        });
+        self.suggest_choices(&mut rows, cx);
         rows.push(Self::tap(
             cx,
             Tap::new("suggest-forget", "Remove the downloaded model")
@@ -1773,6 +1774,55 @@ impl Ide {
             Self::suggest_forget,
         ));
         rows
+    }
+
+    /// The buttons that go with where the model stands.
+    fn suggest_choices(&self, rows: &mut Vec<Div>, cx: &mut Context<Self>) {
+        let stuck = matches!(
+            self.suggest.state,
+            ModelState::Failed(_) | ModelState::Interrupted
+        );
+        if !self.suggest.wanted {
+            rows.push(Self::tap(
+                cx,
+                Tap::new("suggest-on", "Turn code suggestions on"),
+                |this, window, cx| this.suggest_turn_on(Processor::Gpu, window, cx),
+            ));
+            return;
+        }
+        if self.suggest.state == ModelState::NoGpu {
+            rows.push(Self::tap(
+                cx,
+                Tap::new("suggest-cpu", "Run suggestions on the CPU"),
+                |this, window, cx| this.suggest_turn_on(Processor::GpuOrCpu, window, cx),
+            ));
+            return;
+        }
+        if stuck {
+            rows.push(Self::tap(
+                cx,
+                Tap::new("suggest-retry", "Try again"),
+                |this, window, cx| {
+                    let processor = this.suggest.processor;
+                    this.suggest_turn_on(processor, window, cx);
+                },
+            ));
+            // The GPU may be what failed; the CPU is slower but separate.
+            if self.suggest.processor != Processor::Cpu {
+                rows.push(Self::tap(
+                    cx,
+                    Tap::new("suggest-cpu-instead", "Use the CPU instead")
+                        .named("Use the CPU instead for code suggestions"),
+                    |this, window, cx| this.suggest_turn_on(Processor::Cpu, window, cx),
+                ));
+            }
+        }
+        rows.push(Self::tap(
+            cx,
+            Tap::new("suggest-off", "Turn code suggestions off")
+                .named("Turn code suggestions off and free their memory"),
+            |this, _, cx| this.suggest_turn_off(cx),
+        ));
     }
 
     // ----- Finder -----
@@ -2836,14 +2886,14 @@ impl Ide {
 
     /// Says plainly where unsaved work lives and whether the browser may clear it.
     fn storage_note(&self) -> String {
-        let place = match self.kept {
+        let place = match &self.kept {
             Some(Kept::Files) => {
-                "Unsaved changes are kept in this browser's file storage on this device."
+                "Unsaved changes are kept in this browser's file storage on this device.".to_owned()
             }
-            Some(Kept::Small) => {
-                "This browser has no file storage, so unsaved changes are kept in a small store that holds about 5 MB."
-            }
-            None => "Unsaved changes are kept in this browser's storage on this device.",
+            Some(Kept::Small(why)) => format!(
+                "This browser's file storage could not be used ({why}), so unsaved changes are kept in a small store that holds about 5 MB."
+            ),
+            None => "Unsaved changes are kept in this browser's storage on this device.".to_owned(),
         };
         let eviction = if self.persistent == Some(true) {
             "The browser has agreed not to clear it."

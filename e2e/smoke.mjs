@@ -17,7 +17,8 @@
 // the emulated notch and zoom, the swipe gesture, and the WebGPU session.
 
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,12 +66,49 @@ const tinyModel = {
 const software = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"];
 const softwareWebGpu = [...software, "--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-vulkan=swiftshader"];
 const errors = [];
+// Writes a file to the browser's own file storage the way the app does, and
+// says which step fails, if one does.
+const probeFiles = () => page.evaluate(async () => {
+  let step = "navigator.storage.getDirectory()";
+  try {
+    const root = await navigator.storage.getDirectory();
+    step = "getFileHandle(create)";
+    const handle = await root.getFileHandle("probe.txt", { create: true });
+    step = "createWritable()";
+    const stream = await handle.createWritable();
+    step = "write()";
+    await stream.write("probe");
+    step = "close()";
+    await stream.close();
+    step = "reading it back";
+    const text = await (await handle.getFile()).text();
+    await root.removeEntry("probe.txt");
+    return text === "probe" ? "works" : `wrote "probe", read back ${JSON.stringify(text)}`;
+  } catch (error) {
+    return `${step} fails with ${error?.name}: ${error?.message}`;
+  }
+});
 let browser, context, page, layer;
 async function launch(args, settings = {}) {
-  browser = inWebKit ? await webkit.launch() : await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", args });
   // iPhone-sized. The pixel ratio stays 1 because the browser's emulation of a
   // higher one does not resize the canvas backing store the way a real device does.
-  context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, hasTouch: true });
+  const screen = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, hasTouch: true };
+  if (inWebKit) {
+    // A browser started by a test keeps nothing on disk, like a private
+    // window. Say what file storage does there, then run the test the way a
+    // normal window is: with a profile kept on disk.
+    browser = await webkit.launch();
+    page = await browser.newPage();
+    await page.goto(url, { waitUntil: "commit" });
+    console.log(`     (file storage in a private window: ${await probeFiles()})`);
+    await browser.close();
+    context = await webkit.launchPersistentContext(await mkdtemp(join(tmpdir(), "silver-wombat-webkit-")), screen);
+    // Closing this context closes its browser.
+    browser = context;
+  } else {
+    browser = await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", args });
+    context = await browser.newContext(screen);
+  }
   await context.addInitScript((entries) => {
     for (const [key, value] of entries) if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
   }, Object.entries({ "silver-wombat.suggest-model": JSON.stringify(tinyModel), ...settings }));
@@ -175,7 +213,7 @@ try {
     files: typeof navigator.storage?.getDirectory === "function" && typeof globalThis.FileSystemFileHandle?.prototype.createWritable === "function",
   }));
   console.log(`     (${has.agent})`);
-  console.log(`     (WebGPU: ${has.webgpu ? "yes" : "no"}; WebGL2: ${has.webgl2 ? "yes" : "no"}; file storage the app can write to: ${has.files ? "yes" : "no"})`);
+  console.log(`     (WebGPU: ${has.webgpu ? "yes" : "no"}; WebGL2: ${has.webgl2 ? "yes" : "no"}; file storage: ${has.files ? await probeFiles() : "not there"})`);
   await openDemo();
   check(await page.locator("#status").isHidden(), "the app started (no failure message)");
   check((await page.locator("body > canvas").getAttribute("aria-hidden")) === "true", "the canvas is hidden from assistive technology");
@@ -256,7 +294,9 @@ try {
 
   // --- Settings, storage and export ---
   await press("More");
-  check(await hears("paragraph", (text) => text.includes("kept in this browser's file storage")), "unsaved work is kept in the browser's file storage (OPFS)");
+  await hears("paragraph", (text) => text.includes("nsaved changes are kept"));
+  const kept = (await heard("paragraph")).find((text) => text.includes("nsaved changes are kept")) ?? "";
+  check(kept.includes("kept in this browser's file storage"), `unsaved work is kept in the browser's file storage (OPFS)${kept.includes("file storage on") ? "" : `; the settings say: ${kept}`}`);
   const download = page.waitForEvent("download", { timeout: 10_000 });
   await press("Export changes as a patch file");
   const patch = await readFile(await (await download).path(), "utf8");
@@ -563,13 +603,35 @@ try {
   await runLine("tail -n 1 letters.txt");
   check(await says("last words", 15_000), "including the last change made before leaving");
 
+  // --- A model load that never finished is not walked into again ---
+  // What is left behind when the page closes, or the browser ends it for
+  // using too much memory, while the suggestion model is loading.
+  await page.evaluate(() => {
+    localStorage.setItem("silver-wombat.suggest", "gpu");
+    localStorage.setItem("silver-wombat.suggest-loading", "1");
+  });
+  await openDemo();
+  await press("Try the demo (no account)");
+  await press("Terminal");
+  await runLine("echo > letters.txt && open letters.txt");
+  await typeInto("Code editor, /letters.txt", "abc");
+  await settle(2500);
+  await press("More");
+  check(await status("was not started. Last time, the page closed while it was loading", 5_000), "after a model load that never finished, editing does not load the model again, and the settings say why");
+  check((await button("Try again").count()) === 1 && (await button("Use the CPU instead for code suggestions").count()) === 1 && (await button("Turn code suggestions off and free their memory").count()) === 1, "the settings then offer: try again, use the CPU instead, or switch suggestions off");
+  await press("Use the CPU instead for code suggestions");
+  check(await status("is running on the CPU"), "choosing the CPU loads the model there");
+  check((await page.evaluate(() => localStorage.getItem("silver-wombat.suggest-loading"))) === null, "and a load that finished leaves nothing behind");
+  await press("Turn code suggestions off and free their memory");
+  check(await status("Code suggestions are off"), "suggestions can be switched off from there");
+
   check(errors.length === 0, `no errors in the browser console${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
 
   // --- The same app on WebGPU: drawing, and the model on the GPU ---
   if (!inWebKit) {
     await browser.close();
     errors.length = 0;
-    await launch(softwareWebGpu, { "silver-wombat.suggest": "on" });
+    await launch(softwareWebGpu, { "silver-wombat.suggest": "gpu" });
     await openDemo();
     // Two things can happen here, and both are right. Where software WebGPU
     // works (GitHub's runners), the app draws with it. Where its device is lost
@@ -596,6 +658,20 @@ try {
     check((await button("Try WebGPU drawing again (reloads the page)").count()) === (fellBack ? 1 : 0), fellBack ? "the settings say drawing fell back to WebGL2 and offer to try WebGPU again" : "the settings do not mention a fall-back, because there was none");
     await scan("more, on WebGPU");
     check(errors.length === 0, `no errors in the browser console in this session${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
+
+    // The model cannot start on the GPU (here, because its GPU file is
+    // missing). The settings must say so and offer the CPU.
+    await page.evaluate((model) => localStorage.setItem("silver-wombat.suggest-model", JSON.stringify(model)), { ...tinyModel, gpu_f16: "q8", gpu: "q8" });
+    await openDemo();
+    await press("Try the demo (no account)");
+    await press("Terminal");
+    await typeLine("echo > letters.txt && open letters.txt");
+    await typeInto("Code editor, /letters.txt", "klm");
+    await press("More");
+    const told = (needle) => eventually(async () => (await heard("status")).some((text) => text.includes(needle)), 60_000);
+    check(await told("The suggestion model could not be started"), "when the model cannot start on the GPU, the settings say so");
+    await press("Use the CPU instead for code suggestions");
+    check(await told("is running on the CPU"), "and the CPU, offered instead, runs it");
   }
 } catch (error) {
   failures += 1;

@@ -17,7 +17,7 @@ import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
-const MODEL = { repo: "Xenova/tiny_starcoder_py", host: "https://huggingface.co/", gpu_f16: "q4f16", gpu: "q4", cpu: "q4", allow_cpu: true };
+const MODEL = { repo: "Xenova/tiny_starcoder_py", host: "https://huggingface.co/", gpu_f16: "q4f16", gpu: "q4", cpu: "q4", processor: "any" };
 const PROMPT = "<fim_prefix>def add(a, b):\n    return <fim_suffix>\n\nprint(add(1, 2))\n<fim_middle>";
 
 const reachable = await fetch(`${MODEL.host}${MODEL.repo}/resolve/main/config.json`, { signal: AbortSignal.timeout(10_000) }).then((reply) => reply.ok).catch(() => false);

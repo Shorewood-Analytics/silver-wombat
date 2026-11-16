@@ -3,7 +3,9 @@
 // GPU. The page never waits on it: everything here is off the main thread.
 //
 // Messages in (JSON text):
-//   {id, load: {repo, host, gpu_f16, gpu, cpu, allow_cpu}}
+//   {id, load: {repo, host, gpu_f16, gpu, cpu, processor}}
+//       processor: "gpu" (GPU only), "any" (GPU if there is one, else CPU),
+//       or "cpu" (the CPU even where there is a GPU)
 //   {id, complete: {prompt, max_new_tokens}}
 //   {id, forget: true}          delete the downloaded model files
 // Messages out (JSON text):
@@ -45,19 +47,19 @@ async function runtime(host) {
 // with 16-bit floats are the smallest, but need a GPU feature not every
 // device has.
 async function choose(load) {
-  let adapter = null;
-  try {
-    adapter = (await self.navigator.gpu?.requestAdapter()) ?? null;
-  } catch {
-    adapter = null;
+  if (load.processor !== "cpu") {
+    let adapter = null;
+    try {
+      adapter = (await self.navigator.gpu?.requestAdapter()) ?? null;
+    } catch {
+      adapter = null;
+    }
+    if (adapter !== null) {
+      return { device: "webgpu", dtype: adapter.features.has("shader-f16") ? load.gpu_f16 : load.gpu };
+    }
+    if (load.processor === "gpu") throw new Error("no-webgpu");
   }
-  if (adapter !== null) {
-    return { device: "webgpu", dtype: adapter.features.has("shader-f16") ? load.gpu_f16 : load.gpu };
-  }
-  if (load.allow_cpu) {
-    return { device: "wasm", dtype: load.cpu };
-  }
-  throw new Error("no-webgpu");
+  return { device: "wasm", dtype: load.cpu };
 }
 
 async function load(id, request) {
