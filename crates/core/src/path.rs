@@ -48,15 +48,41 @@ pub fn join(dir: &str, name: &str) -> String {
 /// to mean the top of the repository. `Err` says what is wrong with the name,
 /// in words for the person who typed it.
 pub fn for_new_file(dir: &str, name: &str) -> Result<String, &'static str> {
+    placed(
+        dir,
+        name,
+        "Type a name for the new file first.",
+        "That names a folder. Add the file's name after the last slash.",
+    )
+}
+
+/// The path a file or folder in `dir` gets when it is renamed to `name`. As
+/// with [`for_new_file`], the name may include folders on the way, which
+/// moves it there, and may start with `/`.
+pub fn for_new_name(dir: &str, name: &str) -> Result<String, &'static str> {
+    placed(
+        dir,
+        name,
+        "Type the new name first.",
+        "Write the new name without a slash at the end.",
+    )
+}
+
+fn placed(
+    dir: &str,
+    name: &str,
+    when_empty: &'static str,
+    when_a_folder: &'static str,
+) -> Result<String, &'static str> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Type a name for the new file first.");
+        return Err(when_empty);
     }
     if name.ends_with('/') {
-        return Err("That names a folder. Add the file's name after the last slash.");
+        return Err(when_a_folder);
     }
     if name.contains('\\') || name.chars().any(char::is_control) {
-        return Err("A file's name cannot have a backslash or a line break in it.");
+        return Err("A name cannot have a backslash or a line break in it.");
     }
     let mut parts = name.trim_start_matches('/').split('/');
     if parts.any(|part| part.is_empty() || part == "." || part == "..") {
@@ -153,7 +179,19 @@ mod tests {
             "x/.git/y",
         ] {
             assert!(for_new_file("src", bad).is_err(), "{bad:?}");
+            assert!(for_new_name("src", bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn places_a_renamed_file_or_folder() {
+        assert_eq!(for_new_name("src", "tools"), Ok("src/tools".to_owned()));
+        assert_eq!(
+            for_new_name("src", "old/main.py"),
+            Ok("src/old/main.py".to_owned())
+        );
+        assert_eq!(for_new_name("src", "/main.py"), Ok("main.py".to_owned()));
+        assert_eq!(for_new_name("", ""), Err("Type the new name first."));
     }
 
     #[test]

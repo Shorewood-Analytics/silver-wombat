@@ -234,11 +234,30 @@ impl Drop for Shown {
     }
 }
 
+/// Renaming or deleting from the file list, and how far along it is.
+enum Manage {
+    Off,
+    /// The next file or folder tapped is chosen, not opened.
+    Choosing,
+    Chosen {
+        path: String,
+        folder: bool,
+        /// Delete was pressed. It happens only after a second, separate yes.
+        confirming: bool,
+        /// How many files in it hold work that GitHub does not have.
+        uncommitted: usize,
+    },
+}
+
 struct Work {
     workspace: Rc<Workspace>,
     shell: Rc<Shell>,
     dir: String,
     entries: Vec<DirEntry>,
+    manage: Manage,
+    /// A rename or delete has been asked for and has not finished. A second
+    /// press meanwhile (a tremor, a doubled tap) does nothing.
+    manage_running: bool,
     open: Option<String>,
     terminal_text: term::Display,
     /// The pictures the last Python program wrote, and the one being looked at.
@@ -287,6 +306,7 @@ pub struct Ide {
     search_open: bool,
     search_input: Entity<InputState>,
     new_file_input: Entity<InputState>,
+    rename_input: Entity<InputState>,
     suggest: Suggest,
     busy: bool,
     notice: Option<String>,
@@ -330,6 +350,32 @@ fn language_for(file: &str) -> &'static str {
     }
 }
 
+/// What is said before a delete goes ahead: what goes, how it can be brought
+/// back, and what cannot be.
+fn delete_warning(shown: &str, folder: bool, uncommitted: usize) -> String {
+    let lost = match (uncommitted, folder) {
+        (0, _) => String::new(),
+        (_, false) => {
+            " It has work that is not committed. That work cannot be brought back.".to_owned()
+        }
+        (count, true) => format!(
+            " {} in it {} work that is not committed. That work cannot be brought back.",
+            files(count),
+            if count == 1 { "has" } else { "have" },
+        ),
+    };
+    format!(
+        "Delete {shown}{}? It is removed here now, and from GitHub at the next commit. \
+         Until then, Discard in Changes brings back what GitHub has of it.{lost}",
+        if folder { " and everything in it" } else { "" },
+    )
+}
+
+/// "1 file", "3 files".
+fn files(count: usize) -> String {
+    format!("{count} file{}", if count == 1 { "" } else { "s" })
+}
+
 fn drafts_key(workspace: &Workspace, demo: bool) -> String {
     format!(
         "silver-wombat.{}drafts.{}@{}",
@@ -366,6 +412,7 @@ impl Ide {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Text to find"));
         let new_file_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Name for a new file"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New name"));
         let editor = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let terminal = read_only(window, cx, "text");
         let diff = read_only(window, cx, "diff");
@@ -378,6 +425,7 @@ impl Ide {
                 &commit_input,
                 &search_input,
                 &new_file_input,
+                &rename_input,
             ],
             window,
             cx,
@@ -406,6 +454,7 @@ impl Ide {
             search_open: false,
             search_input,
             new_file_input,
+            rename_input,
             suggest: Suggest::new(),
             busy: false,
             notice: None,
@@ -494,6 +543,230 @@ impl Ide {
             .ok();
         })
         .detach();
+    }
+
+    // ----- Rename or delete, from the file list -----
+    //
+    // Each step is its own tap: say that this is what you want, choose the
+    // file or folder, then rename it or delete it. Delete asks once more, and
+    // the yes is a different button in a different place.
+
+    fn manage_start(&mut self, cx: &mut Context<Self>) {
+        if let Some(work) = &mut self.work {
+            work.manage = Manage::Choosing;
+            self.notice = None;
+            cx.notify();
+        }
+    }
+
+    fn manage_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(work) = &mut self.work {
+            work.manage = Manage::Off;
+        }
+        // The name field is going away. Let go of the keyboard, so that Tab
+        // moves between the page's controls again.
+        window.blur(cx);
+        cx.notify();
+    }
+
+    fn manage_choose(
+        &mut self,
+        path: String,
+        folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(work) = &mut self.work else { return };
+        let name = path::file_name(&path).to_owned();
+        work.manage = Manage::Chosen {
+            path,
+            folder,
+            confirming: false,
+            uncommitted: 0,
+        };
+        self.rename_input
+            .update(cx, |input, cx| input.set_value(name, window, cx));
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// Goes into the chosen folder, to choose something in it instead.
+    fn manage_inside(&mut self, folder: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(work) = &mut self.work {
+            work.manage = Manage::Choosing;
+        }
+        window.blur(cx);
+        self.open_dir(folder, window, cx);
+    }
+
+    /// Delete was pressed: ask, and say what would be lost. With `ask` false,
+    /// the answer was no.
+    fn delete_asked(&mut self, ask: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &mut self.work else { return };
+        let Manage::Chosen {
+            path,
+            confirming,
+            uncommitted,
+            ..
+        } = &mut work.manage
+        else {
+            return;
+        };
+        *uncommitted = work.workspace.uncommitted_under(path).len();
+        *confirming = ask;
+        window.blur(cx);
+        cx.notify();
+    }
+
+    fn rename_chosen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &mut self.work else { return };
+        let Manage::Chosen {
+            path: from,
+            folder,
+            confirming: false,
+            ..
+        } = &work.manage
+        else {
+            return;
+        };
+        if work.manage_running {
+            return;
+        }
+        let typed = self.rename_input.read(cx).value().to_string();
+        let to = match path::for_new_name(path::parent(from), &typed) {
+            Ok(to) => to,
+            Err(reason) => {
+                self.notice = Some(reason.to_owned());
+                cx.notify();
+                return;
+            }
+        };
+        let (from, folder) = (from.clone(), *folder);
+        let workspace = work.workspace.clone();
+        work.manage_running = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let moved = workspace.rename_to_unused(&from, &to).await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(work) = &mut this.work {
+                    work.manage_running = false;
+                }
+                match moved {
+                    Ok(count) => {
+                        this.manage_stop(window, cx);
+                        this.follow(&from, Some(&to), window, cx);
+                        this.notice = Some(format!(
+                            "Renamed {}{} to {}{}.",
+                            if folder { "folder " } else { "" },
+                            path::display(&from),
+                            path::display(&to),
+                            if folder {
+                                format!(" ({})", files(count))
+                            } else {
+                                String::new()
+                            },
+                        ));
+                    }
+                    // A taken name leaves the field as it is, to be corrected.
+                    Err(error) => this.fail(&error, cx),
+                }
+                this.refresh_files(window, cx);
+                this.changed(window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn delete_chosen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(work) = &mut self.work else { return };
+        let Manage::Chosen {
+            path,
+            folder,
+            confirming: true,
+            ..
+        } = &work.manage
+        else {
+            return;
+        };
+        if work.manage_running {
+            return;
+        }
+        let (target, folder) = (path.clone(), *folder);
+        let workspace = work.workspace.clone();
+        work.manage_running = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let removed = workspace.remove(&target, true).await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(work) = &mut this.work {
+                    work.manage_running = false;
+                }
+                this.manage_stop(window, cx);
+                match removed {
+                    Ok(count) => {
+                        this.follow(&target, None, window, cx);
+                        this.notice = Some(format!(
+                            "Deleted {}{}{}.",
+                            if folder { "folder " } else { "" },
+                            path::display(&target),
+                            if folder {
+                                format!(" ({})", files(count))
+                            } else {
+                                String::new()
+                            },
+                        ));
+                    }
+                    Err(error) => this.fail(&error, cx),
+                }
+                this.refresh_files(window, cx);
+                this.changed(window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Keeps what is on screen true after `from` (a file, or a folder and
+    /// all in it) was renamed to `to`, or with `None` deleted: the open file,
+    /// a picture being looked at, and a diff being shown.
+    fn follow(
+        &mut self,
+        from: &str,
+        to: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(work) = &mut self.work else { return };
+        let renamed = |old: &str| to.map(|to| format!("{to}{}", &old[from.len()..]));
+        if work
+            .diff_of
+            .as_deref()
+            .is_some_and(|file| path::is_within(file, from))
+        {
+            work.diff_of = None;
+        }
+        let viewed = work
+            .viewed
+            .as_ref()
+            .map(|picture| picture.name.trim_start_matches('/').to_owned())
+            .filter(|file| path::is_within(file, from));
+        if let Some(old) = viewed {
+            match (renamed(&old), &mut work.viewed) {
+                (Some(new), Some(picture)) => picture.name = path::display(&new),
+                _ => work.viewed = None,
+            }
+        }
+        let Some(old) = work.open.clone().filter(|file| path::is_within(file, from)) else {
+            return;
+        };
+        work.open = renamed(&old);
+        // The editor keeps its text. It is made again only when the new name
+        // calls for different colouring, and not while a picture is in front.
+        if let Some(new) = work.open.clone()
+            && work.viewed.is_none()
+            && language_for(&new) != language_for(&old)
+        {
+            self.load_file(new, false, window, cx);
+        }
     }
 
     /// Adds files picked from this device to the folder being shown, as
@@ -631,7 +904,8 @@ impl Ide {
             commit_input,
             search_input,
             new_file_input,
-        ]: [&Entity<InputState>; 6],
+            rename_input,
+        ]: [&Entity<InputState>; 7],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
@@ -690,6 +964,15 @@ impl Ide {
                     }
                 },
             ),
+            cx.subscribe_in(
+                rename_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.rename_chosen(window, cx);
+                    }
+                },
+            ),
         ];
         // Redraw when a field's text changes, so that what a screen reader is
         // told is in the field stays true.
@@ -700,6 +983,7 @@ impl Ide {
             commit_input,
             search_input,
             new_file_input,
+            rename_input,
         ] {
             watching.push(cx.observe(field, |_, _, cx| cx.notify()));
         }
@@ -869,6 +1153,8 @@ impl Ide {
                         shell: Self::new_shell(window, cx),
                         dir: String::new(),
                         entries,
+                        manage: Manage::Off,
+                        manage_running: false,
                         open: None,
                         terminal_text: term::Display::new(),
                         pictures: Vec::new(),
@@ -2910,10 +3196,9 @@ impl Ide {
             .into_any_element()
     }
 
-    fn files_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(work) = &self.work else {
-            return div().into_any_element();
-        };
+    /// A row for each thing in the folder being shown. A tap opens it, or
+    /// while `choosing` picks it to be renamed or deleted.
+    fn file_rows(work: &Work, choosing: bool, cx: &mut Context<Self>) -> Vec<Div> {
         let dir = work.dir.clone();
         let mut rows: Vec<Div> = Vec::new();
         if !dir.is_empty() {
@@ -2933,37 +3218,62 @@ impl Ide {
                 None => "",
             };
             let key = format!("entry-{index}");
-            rows.push(match entry.kind {
-                EntryKind::Dir => Self::tap(
-                    cx,
-                    Tap::new(key, format!("Folder {}{mark}", entry.name)).start(),
-                    move |this, window, cx| this.open_dir(full.clone(), window, cx),
-                ),
-                EntryKind::File | EntryKind::Symlink => {
-                    let is_open = work.open.as_deref() == Some(full.as_str());
-                    let label = if is_open {
-                        format!("{}{mark}  (open)", entry.name)
-                    } else {
-                        format!("{}{mark}", entry.name)
-                    };
-                    Self::tap(
-                        cx,
-                        Tap::new(key, label).ghost().start(),
-                        move |this, window, cx| {
-                            this.open_file(full.clone(), window, cx);
-                        },
-                    )
+            let folder = entry.kind == EntryKind::Dir;
+            let label = match entry.kind {
+                EntryKind::Dir => format!("Folder {}{mark}", entry.name),
+                EntryKind::File | EntryKind::Symlink
+                    if work.open.as_deref() == Some(full.as_str()) =>
+                {
+                    format!("{}{mark}  (open)", entry.name)
                 }
-                EntryKind::Submodule => Self::tap(
+                EntryKind::File | EntryKind::Symlink => format!("{}{mark}", entry.name),
+                EntryKind::Submodule => format!("{} (submodule, cannot be opened)", entry.name),
+            };
+            let mut tap = Tap::new(key, label.clone()).start();
+            if !folder {
+                tap = tap.ghost();
+            }
+            rows.push(if entry.kind == EntryKind::Submodule {
+                Self::tap(cx, tap.disabled(true), |_, _, _| {})
+            } else if choosing {
+                // Something already deleted has nothing left to rename or delete.
+                let gone = entry.change == Some(ChangeKind::Deleted);
+                Self::tap(
                     cx,
-                    Tap::new(key, format!("{} (submodule, cannot be opened)", entry.name))
-                        .start()
-                        .disabled(true),
-                    |_, _, _| {},
-                ),
+                    tap.named(format!("Choose {label}")).disabled(gone),
+                    move |this, window, cx| this.manage_choose(full.clone(), folder, window, cx),
+                )
+            } else if folder {
+                Self::tap(cx, tap, move |this, window, cx| {
+                    this.open_dir(full.clone(), window, cx);
+                })
+            } else {
+                Self::tap(cx, tap, move |this, window, cx| {
+                    this.open_file(full.clone(), window, cx);
+                })
             });
         }
-        v_flex()
+        rows
+    }
+
+    fn files_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(work) = &self.work else {
+            return div().into_any_element();
+        };
+        if let Manage::Chosen {
+            path,
+            folder,
+            confirming,
+            uncommitted,
+        } = &work.manage
+        {
+            let (path, folder) = (path.clone(), *folder);
+            return self.chosen_panel(&path, folder, *confirming, *uncommitted, cx);
+        }
+        let choosing = matches!(work.manage, Manage::Choosing);
+        let dir = work.dir.clone();
+        let rows = Self::file_rows(work, choosing, cx);
+        let pane = v_flex()
             .size_full()
             .p_3()
             .gap_2()
@@ -2975,6 +3285,13 @@ impl Ide {
                 )
                 .text_color(cx.theme().muted_foreground),
             )
+            .children(choosing.then(|| {
+                Self::say(
+                    "manage-how",
+                    Role::Status,
+                    "Choose the file or folder to rename or delete.",
+                )
+            }))
             .child(
                 v_flex()
                     .id("file-list")
@@ -2982,29 +3299,118 @@ impl Ide {
                     .gap_1()
                     .overflow_y_scroll()
                     .children(rows),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Self::field(
-                            "new-file",
-                            "Name for a new file",
-                            &self.new_file_input,
-                            Self::typed(&self.new_file_input, cx),
-                        )
-                        .flex_1(),
+            );
+        if choosing {
+            return pane
+                .child(Self::tap(
+                    cx,
+                    Tap::new("manage-stop", "Cancel").named("Cancel rename or delete"),
+                    Self::manage_stop,
+                ))
+                .into_any_element();
+        }
+        pane.child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Self::field(
+                        "new-file",
+                        "Name for a new file",
+                        &self.new_file_input,
+                        Self::typed(&self.new_file_input, cx),
                     )
-                    .child(Self::tap(
+                    .flex_1(),
+                )
+                .child(Self::tap(
+                    cx,
+                    Tap::new("new-file-create", "Create").named("Create the new file"),
+                    Self::create_file,
+                )),
+        )
+        .child(Self::tap(
+            cx,
+            Tap::new("import", "Add files from this device"),
+            Self::import_files,
+        ))
+        .child(Self::tap(
+            cx,
+            Tap::new("manage", "Rename or delete").named("Rename or delete a file or folder"),
+            |this, _, cx| this.manage_start(cx),
+        ))
+        .into_any_element()
+    }
+
+    /// What can be done with the file or folder chosen in the file list.
+    fn chosen_panel(
+        &self,
+        path: &str,
+        folder: bool,
+        confirming: bool,
+        uncommitted: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = path::file_name(path).to_owned();
+        let shown = path::display(path);
+        let panel = v_flex().size_full().p_3().gap_3().child(Self::say(
+            "manage-chosen",
+            Role::Section,
+            format!("{} {shown}", if folder { "Folder" } else { "File" }),
+        ));
+        if !confirming {
+            return panel
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Self::field(
+                                "rename",
+                                "New name",
+                                &self.rename_input,
+                                Self::typed(&self.rename_input, cx),
+                            )
+                            .flex_1(),
+                        )
+                        .child(Self::tap(
+                            cx,
+                            Tap::new("rename-go", "Rename").named(format!("Rename {name}")),
+                            Self::rename_chosen,
+                        )),
+                )
+                .child(Self::tap(
+                    cx,
+                    Tap::new("delete-ask", format!("Delete {name}")),
+                    |this, window, cx| this.delete_asked(true, window, cx),
+                ))
+                // A folder was tapped: it may be something in it that is meant.
+                .children(folder.then(|| {
+                    let inside = path.to_owned();
+                    Self::tap(
                         cx,
-                        Tap::new("new-file-create", "Create").named("Create the new file"),
-                        Self::create_file,
-                    )),
-            )
+                        Tap::new("manage-inside", format!("Choose something inside {name}")),
+                        move |this, window, cx| this.manage_inside(inside.clone(), window, cx),
+                    )
+                }))
+                .child(Self::tap(
+                    cx,
+                    Tap::new("manage-stop", "Cancel").named("Cancel rename or delete"),
+                    Self::manage_stop,
+                ))
+                .into_any_element();
+        }
+        let warning = delete_warning(&shown, folder, uncommitted);
+        // Keep comes first, where Delete was: a tap repeated by accident
+        // lands on it, not on the yes.
+        panel
+            .child(Self::say("delete-warning", Role::Status, warning))
             .child(Self::tap(
                 cx,
-                Tap::new("import", "Add files from this device"),
-                Self::import_files,
+                Tap::new("delete-keep", format!("Keep {name}")).primary(),
+                |this, window, cx| this.delete_asked(false, window, cx),
+            ))
+            .child(Self::tap(
+                cx,
+                Tap::new("delete-yes", format!("Yes, delete {name}")),
+                Self::delete_chosen,
             ))
             .into_any_element()
     }

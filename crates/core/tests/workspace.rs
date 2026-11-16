@@ -472,6 +472,81 @@ fn a_rejected_branch_update_leaves_changes_in_place() {
 }
 
 #[test]
+fn renaming_from_the_file_list_never_writes_over_anything() {
+    let (_, ws) = setup();
+    // A name that is taken, by a file or by a folder, is refused.
+    for taken in ["README.md", "src/util"] {
+        let refused = block_on(ws.rename_to_unused("src/main.py", taken));
+        assert!(
+            matches!(&refused, Err(Error::Invalid(why)) if why.contains("already there")),
+            "{refused:?}"
+        );
+    }
+    assert!(matches!(
+        block_on(ws.rename_to_unused("src/main.py", "src/main.py")),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        block_on(ws.rename_to_unused("src/gone.py", "src/new.py")),
+        Err(Error::NotFound(_))
+    ));
+    // Nor can a file be moved inside a file, or a folder inside itself.
+    for inside in ["README.md/x.py", "src/main.py/x.py"] {
+        let refused = block_on(ws.rename_to_unused("src/main.py", inside));
+        assert!(refused.is_err(), "{inside}: {refused:?}");
+    }
+    assert!(block_on(ws.rename_to_unused("src", "src/util/src")).is_err());
+    assert!(ws.changes().is_empty(), "a refusal changes nothing");
+
+    // A free name is taken up, for a file and for a folder with its files.
+    assert_eq!(
+        block_on(ws.rename_to_unused("src/main.py", "src/app.py")).unwrap(),
+        1
+    );
+    assert_eq!(
+        block_on(ws.rename_to_unused("src/util", "lib/util")).unwrap(),
+        1
+    );
+    assert_eq!(names(&ws, "src"), ["app.py"]);
+    assert_eq!(names(&ws, "lib/util"), ["math.py"]);
+    assert_eq!(
+        block_on(ws.read_text("src/app.py")).unwrap(),
+        "print('hi')\n"
+    );
+}
+
+#[test]
+fn says_which_files_a_removal_would_lose_work_from() {
+    let (_, ws) = setup();
+    assert!(ws.uncommitted_under("src").is_empty());
+    block_on(ws.write("src/main.py", "print('edited')\n")).unwrap();
+    block_on(ws.write("src/util/new.py", "x = 1\n")).unwrap();
+    block_on(ws.write("srcs.py", "y = 2\n")).unwrap();
+    block_on(ws.remove("README.md", false)).unwrap();
+    assert_eq!(
+        ws.uncommitted_under("src"),
+        ["src/main.py", "src/util/new.py"]
+    );
+    assert_eq!(ws.uncommitted_under("src/util"), ["src/util/new.py"]);
+    assert_eq!(ws.uncommitted_under("src/main.py"), ["src/main.py"]);
+    // A file already removed has nothing left to lose.
+    assert!(ws.uncommitted_under("README.md").is_empty());
+
+    // Removing loses exactly those: discarding the removal brings back what
+    // GitHub has, and a file GitHub never had is gone.
+    block_on(ws.remove("src", true)).unwrap();
+    assert!(ws.uncommitted_under("src").is_empty());
+    for change in ws.changes() {
+        ws.discard(&change.path);
+    }
+    assert_eq!(
+        block_on(ws.read_text("src/main.py")).unwrap(),
+        "print('hi')\n"
+    );
+    assert_eq!(block_on(ws.kind("src/util/new.py")).unwrap(), None);
+}
+
+#[test]
 fn remove_copy_and_rename() {
     let (fake, ws) = setup();
     assert!(matches!(

@@ -817,6 +817,40 @@ impl Workspace {
         Ok(count)
     }
 
+    /// Moves a file or folder to a path that nothing is at. Unlike
+    /// [`Self::rename`], which like `mv` replaces a file already there, this
+    /// refuses and changes nothing. Returns how many files moved.
+    pub async fn rename_to_unused(&self, from: &str, to: &str) -> Result<usize> {
+        if from == to {
+            return Err(Error::Invalid(format!(
+                "{} is the name it already has. Nothing was changed.",
+                path::display(to)
+            )));
+        }
+        if self.kind(to).await?.is_some() {
+            return Err(Error::Invalid(format!(
+                "{} is already there. Nothing was changed.",
+                path::display(to)
+            )));
+        }
+        self.rename(from, to).await
+    }
+
+    /// The files at or inside `target` with work in them that GitHub's branch
+    /// does not have: new files and edited ones. Removing `target` loses that
+    /// work for good, where a removed file that had no changes can be brought
+    /// back by discarding the removal.
+    #[must_use]
+    pub fn uncommitted_under(&self, target: &str) -> Vec<String> {
+        self.changes()
+            .into_iter()
+            .filter(|change| {
+                change.kind != ChangeKind::Deleted && path::is_within(&change.path, target)
+            })
+            .map(|change| change.path)
+            .collect()
+    }
+
     /// Every local change, by path.
     #[must_use]
     pub fn changes(&self) -> Vec<Change> {

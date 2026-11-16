@@ -7,7 +7,7 @@ There is no server: the page talks straight to the GitHub API with your token.
 ## What works today
 
 - Sign in with a GitHub personal access token, or try the built-in demo with no account.
-- Open any repository the token can reach, browse folders and open text files. Files has a field to make a new file in the folder being shown (the name may include new folders, as in `notes/today.md`), and Add files from this device brings in text files from the phone or tablet. Both are unsaved changes like any edit.
+- Open any repository the token can reach, browse folders and open text files. Files has a field to make a new file in the folder being shown (the name may include new folders, as in `notes/today.md`), and Add files from this device brings in text files from the phone or tablet. Rename or delete works from the same list: choose the file or folder, then give it a new name or delete it. A rename never writes over something already there, and delete asks first and says what cannot be brought back. All of these are unsaved changes like any edit.
 - Edit with syntax highlighting. Dark and Midnight themes, sans font, 1.5 line spacing, optional fixed-width code font.
 - Find in the open file: the Find button over the editor, or Control+F or Command+F with a keyboard attached. It says how many places have the text and which one it is at, and steps through them. Upper and lower case are treated alike. There is no replace yet.
 - Three save states, always visible: **Not yet saved**, **Saved on this device**, **Checkpointed to GitHub**.

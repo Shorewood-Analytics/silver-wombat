@@ -765,6 +765,86 @@ try {
   await page.keyboard.press("Control+a");
   await page.keyboard.press("Backspace");
 
+  // --- Rename or delete, from the file list ---
+  const shown = (key) => layer.locator(`[data-key="${key}"]`).textContent();
+  const place = (name) => button(name).evaluate((e) => e.getBoundingClientRect().toJSON());
+  const retype = async (name, text) => {
+    await field(name).dispatchEvent("click");
+    await eventually(() => page.evaluate(() => document.activeElement?.tagName === "TEXTAREA"));
+    await settle(300);
+    for (let attempt = 0; attempt < 3 && (await field(name).textContent()) !== text; attempt += 1) {
+      await page.keyboard.press("Control+a");
+      await page.keyboard.type(text, { delay: 25 });
+      await settle(400);
+    }
+  };
+  await press("Rename or delete a file or folder");
+  check((await status("Choose the file or folder to rename or delete.")) && (await field("Name for a new file").count()) === 0, "asking to rename or delete turns the file list into a list to choose from");
+  await scan("the file list, choosing what to rename or delete");
+  await press("Choose from-device.py  (new)");
+  check(await eventually(async () => (await shown("manage-chosen")) === "File /from-device.py" && (await field("New name").textContent()) === "from-device.py"), "choosing a file shows what can be done with it, with its name ready to change");
+  await scan("a file chosen to rename or delete");
+  await retype("New name", "README.md");
+  await press("Rename from-device.py");
+  check((await status("/README.md is already there. Nothing was changed.")) && (await field("New name").count()) === 1, "a new name that is taken is refused, nothing is written over, and the name can be corrected");
+  await retype("New name", "notes/device.py");
+  await page.keyboard.press("Enter");
+  check(await status("Renamed /from-device.py to /notes/device.py."), "a file is renamed, and moved when the new name has a folder in it");
+  check(await eventually(async () => (await button("from-device.py  (new)").count()) === 0 && (await field("Name for a new file").count()) === 1), "the file list comes back without the old name");
+  await page.keyboard.press("Tab");
+  check(await page.evaluate(() => document.activeElement?.tagName === "BUTTON"), "and the name field that went away no longer holds the keyboard: Tab moves to a button");
+
+  // The file open in the editor is followed to its new name.
+  await press("Folder notes  (new)");
+  await press("Rename or delete a file or folder");
+  await press("Choose today.md  (new)  (open)");
+  await retype("New name", "later.md");
+  await press("Rename today.md");
+  check(await status("Renamed /notes/today.md to /notes/later.md."), "the file that is open can be renamed");
+  await press("Editor");
+  check(await eventually(async () => (await field("Code editor, /notes/later.md").count()) === 1), "and the editor follows it to the new name");
+  await typeInto("Code editor, /notes/later.md", "kept");
+  await press("Terminal");
+  await runLine("cat notes/later.md; ls notes");
+  check((await says("kept", 15_000)) && !(await heard("log")).some((text) => /^today\.md$/m.test(text.split("ls notes").pop())), "what is typed afterwards goes to the new name, and the old one does not come back");
+
+  // Delete asks first, says what cannot be brought back, and no is the nearer answer.
+  await press("Files");
+  await press("Rename or delete a file or folder");
+  await press("Choose device.py  (new)");
+  const deleteAt = await place("Delete device.py");
+  await press("Delete device.py");
+  check(await status("Delete /notes/device.py? It is removed here now, and from GitHub at the next commit. Until then, Discard in Changes brings back what GitHub has of it. It has work that is not committed. That work cannot be brought back."), "delete asks first, and says that uncommitted work cannot be brought back");
+  const [keepAt, yesAt] = [await place("Keep device.py"), await place("Yes, delete device.py")];
+  check(yesAt.y >= deleteAt.y + deleteAt.height || yesAt.y + yesAt.height <= deleteAt.y, "the yes is not where Delete was, so a tap repeated by accident does not confirm it");
+  check(keepAt.y < yesAt.y, "and Keep comes before it");
+  await scan("being asked whether to delete");
+  await press("Keep device.py");
+  check(await eventually(async () => (await button("Delete device.py").count()) === 1), "Keep goes back, and nothing is deleted");
+  await press("Delete device.py");
+  await press("Yes, delete device.py");
+  check((await status("Deleted /notes/device.py.")) && (await eventually(async () => (await button("device.py  (new)").count()) === 0 && (await button("later.md  (new)  (open)").count()) === 1)), "after the yes the file is deleted, and only that file");
+
+  // A folder goes with everything in it, and comes back when the deletion is discarded.
+  await press("Up one folder");
+  await press("Rename or delete a file or folder");
+  await press("Choose Folder docs");
+  check(await eventually(async () => (await shown("manage-chosen")) === "Folder /docs"), "a folder can be chosen too");
+  await press("Choose something inside docs");
+  check((await hears("heading", (text) => text === "Folder /docs")) && (await eventually(async () => (await button("Choose icon.png").count()) === 1)), "and from a chosen folder, something inside it can be chosen instead");
+  await press("Up one folder");
+  await press("Choose Folder docs");
+  await press("Delete docs");
+  check(await status("Delete /docs and everything in it? It is removed here now, and from GitHub at the next commit. Until then, Discard in Changes brings back what GitHub has of it."), "deleting a folder says that everything in it goes");
+  check(!(await heard("status")).some((text) => text.includes("not committed")), "and does not warn of lost work when it holds none");
+  await press("Yes, delete docs");
+  check(await status("Deleted folder /docs (1 file)."), "the folder is deleted, and the count of files is given");
+  check(await eventually(async () => (await button("Folder docs").count()) === 0), "and it is no longer listed as a plain folder");
+  await press("Changes");
+  await press("Discard change to /docs/icon.png");
+  await press("Files");
+  check(await eventually(async () => (await button("Folder docs").count()) === 1), "as the question said, discarding the change brings it back");
+
   // --- When the device cannot store the work, the app must not say it did ---
   const saveState = () => layer.locator('[data-key="save-state"]').textContent();
   await page.evaluate(() => {
