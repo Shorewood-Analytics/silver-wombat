@@ -52,9 +52,15 @@ let siteDown = false;
 // Set to serve the site as a newer build would be: the same files, with
 // another version in the service worker.
 let newerBuild = false;
+// The site is served from a folder, not from the top of the host, because
+// that is how GitHub Pages serves it (/silver-wombat/). An address in the app
+// that only works at the top of a host fails here.
+const BASE = "/silver-wombat/";
 const server = createServer(async (request, response) => {
   if (siteDown) return request.socket.destroy();
-  const path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname));
+  const asked = decodeURIComponent(new URL(request.url, "http://x").pathname);
+  if (!asked.startsWith(BASE)) return response.writeHead(404).end();
+  const path = normalize(`/${asked.slice(BASE.length)}`);
   const fixture = path.match(/^\/fixtures\/([^/]+)\/resolve\/[^/]+\/(.+)$/);
   const root = fixture ? fixtures : dist;
   const file = fixture ? join(fixtures, fixture[1], fixture[2]) : join(dist, path === "/" || path === "\\" ? "index.html" : path);
@@ -68,7 +74,7 @@ const server = createServer(async (request, response) => {
   }
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-const url = `http://127.0.0.1:${server.address().port}/`;
+const url = `http://127.0.0.1:${server.address().port}${BASE}`;
 
 // The stand-in suggestion model: after a letter it suggests the letters that follow.
 const tinyModel = {

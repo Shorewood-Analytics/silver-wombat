@@ -17,3 +17,8 @@ cargo xtask check
 - GPUI must not hold keyboard focus when no text field is being edited: it takes Tab away from the page, which breaks keyboard navigation of the accessibility layer.
 - A secret is typed into `mirror::Role::Secret` (a real password field), never into a GPUI input: GPUI keeps what is typed in a hidden text area that a screen reader reads.
 - The app must never report a change as saved before the write that makes it so has succeeded (see `crates/core/src/workspace.rs`).
+- Every address in the site is relative, so it works from a folder (GitHub Pages serves it at `/silver-wombat/`). The browser test serves it from a folder for that reason.
+- `web/sw.js` keeps the app on the device. `cargo xtask dist` fills in its version from the contents of every file, so do not edit `dist/` by hand, and do not add `skipWaiting` to its install step: a running app must not be given a newer build's files.
+- A picture is shown with `mirror::picture` (a real `<img>` over the canvas), not drawn by GPUI.
+- The merge (`crates/core/src/diff.rs`) is checked against `git merge-file` in `crates/core/tests/merge.rs`. It may ask where git does not; it must not merge where git reports a conflict. After changing it, run that test with `MERGE_ROUNDS=60000` and a few values of `MERGE_SEED`.
+- The WebKit job in CI cannot be run locally where the Playwright download is blocked; read its log after a push.
