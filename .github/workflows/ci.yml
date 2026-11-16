@@ -123,6 +123,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The same browser test in WebKit, the engine Safari is built on. This is
+  # not Safari and not iOS: it is the nearest thing that runs on a Linux
+  # machine. Its result is shown on the pull request but does not gate a merge.
+  webkit:
+    needs: app
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Install WebKit
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright-core install --with-deps webkit
+      - name: Run the site in WebKit
+        run: BROWSER=webkit node e2e/smoke.mjs
+
   # The single required check in the branch ruleset. It passes only if every job above passed.
   ci:
     if: always()

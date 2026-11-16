@@ -9,15 +9,22 @@
 //   npm ci && node smoke.mjs            (after `cargo xtask dist`)
 //
 // CHROME sets the browser binary (default: /usr/bin/google-chrome).
+//
+// BROWSER=webkit runs the same checks in Playwright's WebKit, the engine
+// Safari is built on (`npx playwright-core install --with-deps webkit` first).
+// It is not Safari and not iOS, but it is the nearest thing that runs on a
+// Linux machine. The parts that need Chrome's own controls are left out there:
+// the emulated notch and zoom, the swipe gesture, and the WebGPU session.
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright-core";
+import { chromium, webkit } from "playwright-core";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const inWebKit = process.env.BROWSER === "webkit";
 const dist = join(here, "..", "dist");
 const axeSource = await readFile(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
 const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".wasm": "application/wasm", ".json": "application/json" };
@@ -60,7 +67,7 @@ const softwareWebGpu = [...software, "--enable-unsafe-webgpu", "--enable-feature
 const errors = [];
 let browser, context, page, layer;
 async function launch(args, settings = {}) {
-  browser = await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", args });
+  browser = inWebKit ? await webkit.launch() : await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", args });
   // iPhone-sized. The pixel ratio stays 1 because the browser's emulation of a
   // higher one does not resize the canvas backing store the way a real device does.
   context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, hasTouch: true });
@@ -159,6 +166,16 @@ async function openDemo() {
 
 try {
   // --- Start-up and sign-in screen ---
+  await page.goto(url, { waitUntil: "load" });
+  // What this browser has, for reading the results that follow.
+  const has = await page.evaluate(async () => ({
+    agent: navigator.userAgent,
+    webgpu: (await navigator.gpu?.requestAdapter().catch(() => null)) != null,
+    webgl2: document.createElement("canvas").getContext("webgl2") != null,
+    files: typeof navigator.storage?.getDirectory === "function" && typeof globalThis.FileSystemFileHandle?.prototype.createWritable === "function",
+  }));
+  console.log(`     (${has.agent})`);
+  console.log(`     (WebGPU: ${has.webgpu ? "yes" : "no"}; WebGL2: ${has.webgl2 ? "yes" : "no"}; file storage the app can write to: ${has.files ? "yes" : "no"})`);
   await openDemo();
   check(await page.locator("#status").isHidden(), "the app started (no failure message)");
   check((await page.locator("body > canvas").getAttribute("aria-hidden")) === "true", "the canvas is hidden from assistive technology");
@@ -377,18 +394,22 @@ try {
     const all = [...document.querySelectorAll("#a11y > *")].map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0);
     return { top: Math.min(...all.map((r) => r.top)), bottom: Math.max(...all.map((r) => r.bottom)), right: Math.max(...all.map((r) => r.right)) };
   });
-  const cdp = await context.newCDPSession(page);
-  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { top: 59, bottom: 34, left: 0, right: 0 } });
-  check(await eventually(async () => { const e = await edges(); return e.top >= 59 && e.bottom <= 844 - 34; }), "with a 59-point notch and a 34-point home indicator, nothing is drawn under either");
-  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: {} });
-  check(await eventually(async () => (await edges()).top < 59), "and the space is used again when they are gone");
-  const before = await edges();
-  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
-  await settle(1500);
-  const zoomed = await page.evaluate(() => visualViewport.scale);
-  const after = await edges();
-  check(zoomed === 2 && after.right === before.right && after.bottom === before.bottom && (await button("Hide keyboard").count()) === 0, "pinch-zoom magnifies the page and the interface does not rearrange itself");
-  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+  const cdp = inWebKit ? null : await context.newCDPSession(page);
+  if (cdp) {
+    await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { top: 59, bottom: 34, left: 0, right: 0 } });
+    check(await eventually(async () => { const e = await edges(); return e.top >= 59 && e.bottom <= 844 - 34; }), "with a 59-point notch and a 34-point home indicator, nothing is drawn under either");
+    await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: {} });
+    check(await eventually(async () => (await edges()).top < 59), "and the space is used again when they are gone");
+    const before = await edges();
+    await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+    await settle(1500);
+    const zoomed = await page.evaluate(() => visualViewport.scale);
+    const after = await edges();
+    check(zoomed === 2 && after.right === before.right && after.bottom === before.bottom && (await button("Hide keyboard").count()) === 0, "pinch-zoom magnifies the page and the interface does not rearrange itself");
+    await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+  } else {
+    console.log("     (not run in WebKit: the emulated notch, home indicator and pinch-zoom)");
+  }
 
   // --- Finder: reach any file or action by typing a few letters ---
   const finder = () => field("Find a file or action").count();
@@ -426,18 +447,23 @@ try {
     await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [], timestamp: start + seconds });
     await settle(600);
   };
-  await swipe(320, 120);
-  check(await eventually(async () => (await field("Commit message").count()) + (await layer.getByRole("heading", { name: "Nothing changed since the last commit." }).count()) >= 1 && (await field("Command").count()) === 0, 5_000), "a quick swipe to the left goes from Terminal to Changes");
-  await swipe(120, 320);
-  check(await eventually(async () => (await field("Command").count()) === 1, 5_000), "a swipe to the right goes back to Terminal");
-  await swipe(320, 120, 1.5);
-  check((await field("Command").count()) === 1, "a slow drag is not a swipe");
-  await swipe(8, 240);
-  check((await field("Command").count()) === 1, "nor is a swipe from the screen's edge, which is Safari's Back");
-  await press("More");
-  await press("Swipe to change pane: on. Turn off");
-  await swipe(120, 320);
-  check((await button("Swipe to change pane: off. Turn on").count()) === 1, "swiping can be switched off, and then a swipe does nothing");
+  if (cdp) {
+    await swipe(320, 120);
+    check(await eventually(async () => (await field("Commit message").count()) + (await layer.getByRole("heading", { name: "Nothing changed since the last commit." }).count()) >= 1 && (await field("Command").count()) === 0, 5_000), "a quick swipe to the left goes from Terminal to Changes");
+    await swipe(120, 320);
+    check(await eventually(async () => (await field("Command").count()) === 1, 5_000), "a swipe to the right goes back to Terminal");
+    await swipe(320, 120, 1.5);
+    check((await field("Command").count()) === 1, "a slow drag is not a swipe");
+    await swipe(8, 240);
+    check((await field("Command").count()) === 1, "nor is a swipe from the screen's edge, which is Safari's Back");
+    await press("More");
+    await press("Swipe to change pane: on. Turn off");
+    await swipe(120, 320);
+    check((await button("Swipe to change pane: off. Turn on").count()) === 1, "swiping can be switched off, and then a swipe does nothing");
+  } else {
+    console.log("     (not run in WebKit: the swipe gesture)");
+    await press("More");
+  }
 
   // --- Code suggestions, with the stand-in model ---
   const status = (needle, timeout = 30_000) => eventually(async () => (await heard("status")).some((text) => text.includes(needle)), timeout);
@@ -540,38 +566,43 @@ try {
   check(errors.length === 0, `no errors in the browser console${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
 
   // --- The same app on WebGPU: drawing, and the model on the GPU ---
-  await browser.close();
-  errors.length = 0;
-  await launch(softwareWebGpu, { "silver-wombat.suggest": "on" });
-  await openDemo();
-  // Two things can happen here, and both are right. Where software WebGPU
-  // works (GitHub's runners), the app draws with it. Where its device is lost
-  // as soon as drawing starts (seen with Chrome 153), the page notes that
-  // WebGPU drawing failed, reloads once, and draws with WebGL2.
-  const fellBack = await eventually(async () => (await page.evaluate(() => localStorage.getItem("silver-wombat.renderer"))) === "webgl", 8_000);
-  console.log(`     (WebGPU drawing ${fellBack ? "lost its device here, so this tests the fall-back to WebGL2" : "works here, so this tests drawing with WebGPU"})`);
-  await button("Try the demo (no account)").waitFor({ state: "attached", timeout: 60_000 });
-  await settle(1500);
-  if (fellBack) errors.length = 0;
-  check(await page.evaluate(async () => (await navigator.gpu?.requestAdapter()) != null), "this browser session has WebGPU (a software one)");
-  check((await page.screenshot()).length > 12_000, `the app is drawn, ${fellBack ? "with WebGL2 after the reload" : "with WebGPU"} (the screenshot is not a blank page)`);
-  await press("Try the demo (no account)");
-  await press("Terminal");
-  const typeLine = async (line) => {
-    await typeInto("Command", line);
-    await press("Run");
-  };
-  await typeLine("echo > letters.txt && open letters.txt");
-  await typeInto("Code editor, /letters.txt", "klm");
-  check(await eventually(async () => (await heard("status")).some((text) => text.includes("Suggestion: nopqrst")), 60_000), "a suggestion arrives (after klm: nopqrst...)");
-  await press("More");
-  check(await eventually(async () => (await heard("status")).some((text) => text.includes("is running on the GPU (WebGPU)"))), "the model itself runs on WebGPU, in its worker, and the settings say so");
-  check((await button("Try WebGPU drawing again (reloads the page)").count()) === (fellBack ? 1 : 0), fellBack ? "the settings say drawing fell back to WebGL2 and offer to try WebGPU again" : "the settings do not mention a fall-back, because there was none");
-  await scan("more, on WebGPU");
-  check(errors.length === 0, `no errors in the browser console in this session${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
+  if (!inWebKit) {
+    await browser.close();
+    errors.length = 0;
+    await launch(softwareWebGpu, { "silver-wombat.suggest": "on" });
+    await openDemo();
+    // Two things can happen here, and both are right. Where software WebGPU
+    // works (GitHub's runners), the app draws with it. Where its device is lost
+    // as soon as drawing starts (seen with Chrome 153), the page notes that
+    // WebGPU drawing failed, reloads once, and draws with WebGL2.
+    const fellBack = await eventually(async () => (await page.evaluate(() => localStorage.getItem("silver-wombat.renderer"))) === "webgl", 8_000);
+    console.log(`     (WebGPU drawing ${fellBack ? "lost its device here, so this tests the fall-back to WebGL2" : "works here, so this tests drawing with WebGPU"})`);
+    await button("Try the demo (no account)").waitFor({ state: "attached", timeout: 60_000 });
+    await settle(1500);
+    if (fellBack) errors.length = 0;
+    check(await page.evaluate(async () => (await navigator.gpu?.requestAdapter()) != null), "this browser session has WebGPU (a software one)");
+    check((await page.screenshot()).length > 12_000, `the app is drawn, ${fellBack ? "with WebGL2 after the reload" : "with WebGPU"} (the screenshot is not a blank page)`);
+    await press("Try the demo (no account)");
+    await press("Terminal");
+    const typeLine = async (line) => {
+      await typeInto("Command", line);
+      await press("Run");
+    };
+    await typeLine("echo > letters.txt && open letters.txt");
+    await typeInto("Code editor, /letters.txt", "klm");
+    check(await eventually(async () => (await heard("status")).some((text) => text.includes("Suggestion: nopqrst")), 60_000), "a suggestion arrives (after klm: nopqrst...)");
+    await press("More");
+    check(await eventually(async () => (await heard("status")).some((text) => text.includes("is running on the GPU (WebGPU)"))), "the model itself runs on WebGPU, in its worker, and the settings say so");
+    check((await button("Try WebGPU drawing again (reloads the page)").count()) === (fellBack ? 1 : 0), fellBack ? "the settings say drawing fell back to WebGL2 and offer to try WebGPU again" : "the settings do not mention a fall-back, because there was none");
+    await scan("more, on WebGPU");
+    check(errors.length === 0, `no errors in the browser console in this session${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`);
+  }
 } catch (error) {
   failures += 1;
   console.log(`FAIL the test stopped: ${error.message.split("\n")[0]}`);
+  if (errors.length) console.log(`     errors in the browser console so far: ${errors.slice(0, 5).join(" | ")}`);
+  const notice = await page.locator("#status").textContent({ timeout: 2_000 }).catch(() => "");
+  if (notice?.trim()) console.log(`     the page's own failure message: ${notice.trim().slice(0, 300)}`);
   await page.screenshot({ path: join(here, "failure.png") }).catch(() => {});
 } finally {
   await browser.close();
