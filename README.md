@@ -40,6 +40,8 @@ The iPhone Duo widths are worked out from Apple's published pixel counts at 3x. 
 
 **Not yet tried on a device.** All of this is tested in desktop Chrome with a phone-sized window, touch events, an emulated notch and emulated zoom. The on-screen keyboard's behaviour in Safari cannot be emulated there, so the part that moves the interface above the keyboard has not run at all outside unit tests of its arithmetic.
 
+**Tried in Safari's engine, not in Safari.** CI also runs the browser test in WebKit 27.2, the engine Safari is built on, on Linux. There the app starts, draws with WebGL2 and passes every check that does not need Chrome's own controls (117 of them): editing and the save states, the terminal, all four Python versions with numpy and pip, the finder, the extra keys, the three layouts, suggestions on the CPU, a commit conflict, full storage, and leaving the page mid-edit. That build has no WebGPU, so WebGPU in WebKit has not run. The emulated notch, zoom and swipe are not run there.
+
 ## Code suggestions
 
 More > Turn code suggestions on. After a pause in typing, a suggested end of the line appears under the editor with two buttons, Insert and Dismiss. A screen reader hears the suggestion when it arrives.
@@ -48,6 +50,7 @@ More > Turn code suggestions on. After a pause in typing, a suggested end of the
 - **It runs on the device**, in a background worker, through [Transformers.js](https://huggingface.co/docs/transformers.js) and ONNX Runtime. On a browser with WebGPU it runs on the GPU. Without WebGPU the settings say so and offer the CPU, which is slower. Code is never sent anywhere.
 - **The download** happens once, when suggestions are switched on: 224 MB on a GPU with 16-bit floats, 320 MB otherwise, from `huggingface.co`. The browser keeps it. The settings show the size before and after, and progress during.
 - **Memory.** The model is loaded the first time it is needed, not when the app opens. Turn code suggestions off ends the worker and gives the memory back. Remove the downloaded model deletes the files.
+- **When it fails.** If the model cannot start, the settings say why and offer three choices: try again, use the CPU instead, or switch suggestions off. If the page closes while the model is loading (a phone's browser ends a page that uses too much memory), the app notes it and does not load the model again until asked, so a model too big for the device cannot end the page on every visit.
 - **Another model.** Put a description in `localStorage` under `silver-wombat.suggest-model` (the fields of `Model` in `crates/core/src/complete.rs`, as JSON) to use any text-generation model in Transformers.js's ONNX layout, from any host.
 
 What has been run: the whole path (settings, download, the worker, generation on the CPU and on WebGPU, the offer, Insert) in Chrome with a stand-in model of a few kilobytes. `e2e/model.mjs` loads and runs the real model in Chrome, on software WebGPU and on the CPU; CI runs it and prints what the model suggested and how long it took, without failing the build if the download does.
@@ -104,7 +107,7 @@ Known gaps: a screen reader hears the end of the terminal output and of a diff, 
 ## What does not work yet
 
 - Apart from Python, the terminal has no machine behind it. `cargo`, `npm` and other programs answer "not available".
-- Local changes are kept in the browser's origin-private file system (Safari 26 or later; older browsers fall back to `localStorage`, about 5 MB). The app asks the browser not to evict it, but the browser may refuse, so the GitHub checkpoint is the durable copy. More > Export writes all changes to a patch file that `git apply` accepts.
+- Local changes are kept in the browser's origin-private file system (Safari 26 or later; older browsers fall back to `localStorage`, about 5 MB). WebKit refuses that file system to a window that keeps nothing on disk, which is what a private window is, so there the small store is used too. More says which store is in use and, for the small one, the browser's reason. The app asks the browser not to evict it, but the browser may refuse, so the GitHub checkpoint is the durable copy. More > Export writes all changes to a patch file that `git apply` accepts.
 - GitHub sign-in with a browser redirect is not possible from a static page: GitHub's login endpoints do not allow cross-origin browser requests. A token is the only way in.
 - Only text files up to 2 MB open in the editor.
 
@@ -185,6 +188,13 @@ To run the built site in a real browser and operate it end to end (needs Chrome 
 cargo xtask dist
 npm ci --prefix e2e && node e2e/smoke.mjs
 node e2e/model.mjs    # the real suggestion model; downloads about 320 MB
+```
+
+The same test runs in WebKit, the engine Safari is built on (CI does this in its `webkit` job; the result is shown on a pull request and does not gate a merge):
+
+```sh
+(cd e2e && npx playwright-core install --with-deps webkit)
+BROWSER=webkit node e2e/smoke.mjs
 ```
 
 **Drawing.** GPUI draws with WebGPU where the browser has it and WebGL2 where it does not. Both have been seen working, in different places: with Chrome's software WebGPU on GitHub's runners the app draws with WebGPU; with the same switches on Chrome 153 the WebGPU device is lost as soon as drawing starts, which leaves a blank canvas. The app guards against that: if the WebGPU device is lost, it remembers to use WebGL2 on that device and reloads once (unsaved work is already on the device and comes back). More then says so and offers to try WebGPU again. The test covers whichever of the two happens where it runs. Neither has been seen on real GPU hardware.
