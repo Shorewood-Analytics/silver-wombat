@@ -36,6 +36,12 @@ const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/ja
 const CDN = "https://cdn.jsdelivr.net/pyodide/";
 const online = await fetch(`${CDN}v314.0.8/full/pyodide-lock.json`, { signal: AbortSignal.timeout(8_000) }).then((reply) => reply.ok).catch(() => false);
 
+// Where GitHub can be reached (CI), the test also checks that a browser is
+// allowed to talk to it from this page. It uses a made-up token, so nothing
+// is read or written: GitHub's answer is "401, bad token", and getting that
+// answer at all is the point.
+const reachesGitHub = await fetch("https://api.github.com/zen", { signal: AbortSignal.timeout(8_000) }).then((reply) => reply.ok).catch(() => false);
+
 // Code suggestions are tested with a stand-in model of a few kilobytes (see
 // fixtures/make_tiny_model.py), served here the way Hugging Face serves a
 // real one: <host>/<repository>/resolve/<revision>/<file>.
@@ -224,6 +230,35 @@ try {
   await settle(500);
   const exposed = await page.evaluate(() => document.documentElement.outerHTML.includes("not-a-real-token") || [...document.querySelectorAll("textarea")].some((entry) => entry.value.includes("not-a-real-token")));
   check((await token.inputValue()) === "not-a-real-token" && !exposed, "what is typed there is in the password field and nowhere else on the page");
+  if (reachesGitHub) {
+    await press("Sign in");
+    const refused = await eventually(async () => (await heard("status")).some((text) => text.includes("GitHub did not accept the token")), 30_000);
+    check(refused, `signing in with a made-up token reaches the real GitHub, and its refusal is reported${refused ? "" : ` (the app said: ${(await heard("status")).join(" | ") || "nothing"})`}`);
+    // The requests that save work are POST and PATCH with a token and a JSON
+    // body. A browser asks GitHub's permission before sending those from
+    // another site. A 401 means permission was given and the request was sent.
+    const writes = await page.evaluate(async () => {
+      const answers = [];
+      for (const [method, path] of [["POST", "git/blobs"], ["PATCH", "git/refs/heads/main"]]) {
+        try {
+          const reply = await fetch(`https://api.github.com/repos/octocat/Hello-World/${path}`, {
+            method,
+            mode: "cors",
+            cache: "no-store",
+            headers: { Accept: "application/vnd.github+json", Authorization: "Bearer not-a-real-token", "Content-Type": "application/json" },
+            body: "{}",
+          });
+          answers.push(`${method} ${reply.status}`);
+        } catch (error) {
+          answers.push(`${method} blocked: ${error.message}`);
+        }
+      }
+      return answers;
+    });
+    check(writes.join(", ") === "POST 401, PATCH 401", `GitHub lets this page send the requests that save work (${writes.join(", ")}; 401 is its answer to the made-up token)`);
+  } else {
+    console.log("     (GitHub is not reachable from here: the checks that talk to the real GitHub are not run)");
+  }
   await token.fill("");
   // Give the keyboard back to the page for the next check.
   await page.evaluate(() => document.activeElement?.blur());
