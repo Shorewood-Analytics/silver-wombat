@@ -1,10 +1,29 @@
-[package]
-name = "silver-wombat"
+[workspace]
+resolver = "3"
+members = ["crates/app", "crates/core", "xtask"]
+# The app crate only targets the browser. Plain `cargo test` and `cargo clippy`
+# at the root cover the crates that build on this machine; `cargo xtask check`
+# covers the app.
+default-members = ["crates/core", "xtask"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "silver-wombat"
 
-[dependencies]
-
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+# The browser downloads this on a phone, so size comes first.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+# Quick local builds of the WASM module: `cargo xtask dist --profile quick`.
+[profile.quick]
+inherits = "release"
+opt-level = 1
+lto = "off"
+codegen-units = 16

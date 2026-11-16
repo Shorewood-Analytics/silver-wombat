@@ -1,0 +1,8 @@
+{
+  "name": "silver-wombat-ml",
+  "private": true,
+  "description": "The runtime that runs the code-suggestion model in the browser: Transformers.js and the ONNX Runtime it uses. `cargo xtask dist` copies three files from here into dist/ml/. The model itself is not here; the browser downloads it when suggestions are switched on.",
+  "dependencies": {
+    "@huggingface/transformers": "4.3.2"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "silver-wombat-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Runs the built site in a real browser and operates it through its accessibility layer.",
+  "scripts": {
+    "test": "node smoke.mjs"
+  },
+  "dependencies": {
+    "axe-core": "4.14.0",
+    "playwright-core": "1.65.1"
+  }
+}

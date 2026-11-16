@@ -1,0 +1,68 @@
+[package]
+name = "silver-wombat-app"
+description = "GPUI front end of the silver-wombat browser IDE"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+# The app only runs in a browser. Keeping every dependency behind the wasm cfg
+# makes a native build of this crate empty, so plain `cargo` commands at the
+# workspace root never need GPUI's desktop system libraries.
+[target.'cfg(target_family = "wasm")'.dependencies]
+silver-wombat-core = { path = "../core" }
+gpui-kit = { version = "=0.9.1", features = ["syntect"] }
+# Only to choose the drawing backend (WebGPU or WebGL2) at start-up; the rest
+# of GPUI comes through gpui-kit. Keep at the version gpui-kit uses.
+gpui_web = { package = "gpui-pre-web", version = "=0.3.12" }
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "AddEventListenerOptions",
+  "Blob",
+  "CacheStorage",
+  "BlobPropertyBag",
+  "Document",
+  "Element",
+  "Event",
+  "EventTarget",
+  "File",
+  "FileList",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetFileOptions",
+  "FileSystemWritableFileStream",
+  "Headers",
+  "HtmlAnchorElement",
+  "HtmlElement",
+  "HtmlInputElement",
+  "InputEvent",
+  "KeyboardEvent",
+  "Location",
+  "MessageEvent",
+  "Navigator",
+  "Node",
+  "PointerEvent",
+  "Request",
+  "RequestCache",
+  "RequestInit",
+  "RequestMode",
+  "Response",
+  "Storage",
+  "StorageManager",
+  "Url",
+  "VisualViewport",
+  "Window",
+  "Worker",
+  "WorkerOptions",
+  "WorkerType",
+  "WritableStream",
+] }
