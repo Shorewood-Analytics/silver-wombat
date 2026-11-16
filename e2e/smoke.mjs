@@ -416,9 +416,10 @@ try {
       await runLine(`uv python pin ${version} && python -c "import numpy; print('numpy', numpy.__version__)"`);
       check(await says(`numpy ${numpy}`, 180_000), `Python ${version} downloads numpy from the CDN on import (numpy ${numpy})`);
     }
-    await runLine(`uv python pin 3.14 && python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.plot([1, 4, 9]); plt.savefig('plot.png'); print('plot', 'saved')"`);
+    await runLine(`uv python pin 3.14 && python -c "import matplotlib.pyplot as plt; plt.plot([1, 4, 9]); plt.savefig('plot.png'); plt.show(); print('plot', 'saved')"`);
     check((await says("plot saved", 240_000)) && (await eventually(async () => (await button("Show plot.png").count()) === 1)), "matplotlib downloads from the CDN and saves a plot");
-    await press("Show plot.png");
+    check((await button("Show figure-1.png").count()) === 1, "plt.show() hands its figure over as a picture too");
+    await press("Show figure-1.png");
     const plot = layer.locator("img");
     const width = await eventually(async () => (await plot.count()) === 1 && (await plot.evaluate((img) => img.complete && img.naturalWidth > 100))) ? await plot.evaluate((img) => img.naturalWidth) : 0;
     check(width > 100, `and the plot can be looked at (${width} pixels wide)`);

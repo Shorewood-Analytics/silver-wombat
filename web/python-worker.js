@@ -17,6 +17,39 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 // The file name Python reports for this worker's own code, so it can be left
 // out of error traces.
 const HERE = "<silver-wombat>";
+// Where plt.show() puts its figures, and where the code that does that lives.
+const FIGURES = "/tmp/silver-wombat-figures";
+const SUPPORT = "/lib/silver-wombat";
+
+// matplotlib asks its "backend" what show() means. In a desktop terminal that
+// opens a window. Here it saves each open figure as a picture, which the page
+// then offers under the terminal. Everything else is matplotlib's own Agg
+// backend, the one that draws to a file. It is only loaded if a program uses
+// matplotlib.
+const FIGURE_BACKEND = `
+import os
+
+from matplotlib._pylab_helpers import Gcf
+from matplotlib.backend_bases import FigureManagerBase
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+FOLDER = "${FIGURES}"
+
+
+class FigureManager(FigureManagerBase):
+    @classmethod
+    def pyplot_show(cls, *, block=None):
+        os.makedirs(FOLDER, exist_ok=True)
+        for manager in Gcf.get_all_fig_managers():
+            number = len(os.listdir(FOLDER)) + 1
+            manager.canvas.figure.savefig(os.path.join(FOLDER, "figure-%d.png" % number))
+        # A window that has been looked at and closed: the figure is done.
+        Gcf.destroy_all()
+
+
+class FigureCanvas(FigureCanvasAgg):
+    manager_class = FigureManager
+`;
 
 let loading = null;
 let loadedPython = null;
@@ -88,6 +121,8 @@ async function start(job, progress) {
   pyodide.setStdout({ write: collect, isatty: false });
   pyodide.setStderr({ write: collect, isatty: false });
   pyodide.FS.mkdirTree(ROOT);
+  pyodide.FS.mkdirTree(SUPPORT);
+  pyodide.FS.writeFile(`${SUPPORT}/_silver_wombat_figures.py`, FIGURE_BACKEND);
   pyodide.globals.set("_silver_wombat_send", () => sendOutput(true));
   pyodide.runPython(DRIVER, { filename: HERE });
   return pyodide;
@@ -117,6 +152,10 @@ def _silver_wombat():
 
     ROOT = "${ROOT}"
     HERE = "${HERE}"
+
+    # Where matplotlib finds what show() does here (see FIGURE_BACKEND).
+    sys.path.append("${SUPPORT}")
+    os.environ.setdefault("MPLBACKEND", "module://_silver_wombat_figures")
 
     # Hand each line over as it is printed, so a terminal can show output
     # while the program runs, without claiming to be a terminal (which would
@@ -279,6 +318,8 @@ function walk(FS, path, found) {
 async function run(pyodide, job, progress) {
   const FS = pyodide.FS;
   removeTree(FS, ROOT);
+  FS.mkdirTree(FIGURES);
+  removeTree(FS, FIGURES);
   const given = new Map();
   for (const [path, text] of job.files) {
     const full = `${ROOT}/${path}`;
@@ -389,6 +430,15 @@ async function run(pyodide, job, progress) {
   }
   for (const path of given.keys()) {
     if (!seen.has(path)) changed.push([path, null]);
+  }
+  // Figures from plt.show().
+  const figures = [];
+  walk(FS, FIGURES, figures);
+  for (const full of figures.sort((a, b) => a.length - b.length || a.localeCompare(b))) {
+    const bytes = FS.readFile(full);
+    if (pictures.length < MAX_PICTURES && bytes.length <= MAX_PICTURE_BYTES) {
+      pictures.push({ path: full.slice(FIGURES.length + 1), type: "image/png", data: base64(bytes) });
+    }
   }
   return { status, changed, binary, pictures };
 }
