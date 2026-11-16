@@ -496,7 +496,7 @@ fn renaming_from_the_file_list_never_writes_over_anything() {
         assert!(refused.is_err(), "{inside}: {refused:?}");
     }
     assert!(block_on(ws.rename_to_unused("src", "src/util/src")).is_err());
-    assert!(ws.changes().is_empty(), "a refusal changes nothing");
+    assert_eq!(ws.changes().len(), 0, "a refusal changes nothing");
 
     // A free name is taken up, for a file and for a folder with its files.
     assert_eq!(
@@ -518,7 +518,7 @@ fn renaming_from_the_file_list_never_writes_over_anything() {
 #[test]
 fn says_which_files_a_removal_would_lose_work_from() {
     let (_, ws) = setup();
-    assert!(ws.uncommitted_under("src").is_empty());
+    assert_eq!(ws.uncommitted_under("src"), Vec::<String>::new());
     block_on(ws.write("src/main.py", "print('edited')\n")).unwrap();
     block_on(ws.write("src/util/new.py", "x = 1\n")).unwrap();
     block_on(ws.write("srcs.py", "y = 2\n")).unwrap();
@@ -530,12 +530,12 @@ fn says_which_files_a_removal_would_lose_work_from() {
     assert_eq!(ws.uncommitted_under("src/util"), ["src/util/new.py"]);
     assert_eq!(ws.uncommitted_under("src/main.py"), ["src/main.py"]);
     // A file already removed has nothing left to lose.
-    assert!(ws.uncommitted_under("README.md").is_empty());
+    assert_eq!(ws.uncommitted_under("README.md"), Vec::<String>::new());
 
     // Removing loses exactly those: discarding the removal brings back what
     // GitHub has, and a file GitHub never had is gone.
     block_on(ws.remove("src", true)).unwrap();
-    assert!(ws.uncommitted_under("src").is_empty());
+    assert_eq!(ws.uncommitted_under("src"), Vec::<String>::new());
     for change in ws.changes() {
         ws.discard(&change.path);
     }
