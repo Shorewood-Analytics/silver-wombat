@@ -338,6 +338,52 @@ try {
   await page.keyboard.press("Enter");
   check(await counted("1 of 3"), "Enter in the field goes to the next place, round to the first");
   await scan("editor with find");
+
+  // Replace, in the same bar, and Undo and Redo beside it.
+  const place = (name) => button(name).evaluate((e) => e.getBoundingClientRect().toJSON());
+  const retype = async (name, text) => {
+    await field(name).dispatchEvent("click");
+    await eventually(() => page.evaluate(() => document.activeElement?.tagName === "TEXTAREA"));
+    await settle(300);
+    for (let attempt = 0; attempt < 3 && (await field(name).textContent()) !== text; attempt += 1) {
+      await page.keyboard.press("Control+a");
+      await page.keyboard.type(text, { delay: 25 });
+      await settle(400);
+    }
+  };
+  const apart = (one, other) => one.x + one.width <= other.x || other.x + other.width <= one.x || one.y + one.height <= other.y || other.y + other.height <= one.y;
+  await press("Replace text");
+  check(await eventually(async () => (await field("Replace with").count()) === 1 && (await button("Replace all 3 places").count()) === 1), "Replace adds a field for the new text, and says how many places Replace all would change");
+  await press("Replace all 3 places");
+  check(await counted('Remove "greet" from 3 places?'), "with no new text, Replace all asks whether to remove the text found");
+  await press("Keep as it is");
+  await typeInto("Replace with", "salute");
+  await scan("editor with replace");
+  await press("Replace this place");
+  check(await counted("1 of 2"), "Replace changes the place it is at, and moves to the next");
+  await field("Replace with").dispatchEvent("click");
+  await settle(300);
+  await page.keyboard.press("Enter");
+  check(await counted("1 of 1"), "Enter in the field does the same");
+  const allAt = await place("Replace all 1 place");
+  await press("Replace all 1 place");
+  check(await counted('Replace "greet" with "salute" in 1 place?'), "Replace all asks first, naming both texts and how many places");
+  const [replaceKeepAt, replaceYesAt] = [await place("Keep as it is"), await place("Yes, replace in 1 place")];
+  check(apart(replaceYesAt, allAt) && replaceKeepAt.x < replaceYesAt.x, "the yes is not where Replace all was, and Keep comes before it");
+  await scan("being asked whether to replace all");
+  await press("Keep as it is");
+  check((await counted("1 of 1")) && (await button("Replace all 1 place").count()) === 1, "Keep goes back, and nothing is replaced");
+  await press("Replace all 1 place");
+  await press("Yes, replace in 1 place");
+  check((await counted("Replaced 1 place. Undo takes that back.")) && (await counted("Not found")), "after the yes every place is replaced, and how many is said");
+  await retype("Find in this file", "salute");
+  check(await counted("1 of 3"), "the new text is in the file, in all three places");
+  await press("Undo the last change");
+  check(await counted("1 of 2"), "Undo takes back the last replacement, with no keyboard needed");
+  await press("Redo the change undone");
+  check(await counted("1 of 3"), "Redo puts it back");
+  for (let step = 0; step < 3; step += 1) await press("Undo the last change");
+  check(await counted("Not found"), "and Undo, pressed once for each, takes all three back");
   await typeInto("Find in this file", "zebra");
   check((await counted("Not found")) && (await button("Next place found").isDisabled()), "text that is not in the file says so, and there is nowhere to step to");
   await press("Close find");
@@ -767,17 +813,6 @@ try {
 
   // --- Rename or delete, from the file list ---
   const shown = (key) => layer.locator(`[data-key="${key}"]`).textContent();
-  const place = (name) => button(name).evaluate((e) => e.getBoundingClientRect().toJSON());
-  const retype = async (name, text) => {
-    await field(name).dispatchEvent("click");
-    await eventually(() => page.evaluate(() => document.activeElement?.tagName === "TEXTAREA"));
-    await settle(300);
-    for (let attempt = 0; attempt < 3 && (await field(name).textContent()) !== text; attempt += 1) {
-      await page.keyboard.press("Control+a");
-      await page.keyboard.type(text, { delay: 25 });
-      await settle(400);
-    }
-  };
   await press("Rename or delete a file or folder");
   check((await status("Choose the file or folder to rename or delete.")) && (await field("Name for a new file").count()) === 0, "asking to rename or delete turns the file list into a list to choose from");
   await scan("the file list, choosing what to rename or delete");

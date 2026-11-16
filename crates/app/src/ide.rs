@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, RopeExt as _,
+    Editor, EditorState, Input, InputEvent, InputState, Redo, RopeExt as _, Undo,
 };
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -305,6 +305,11 @@ pub struct Ide {
     /// Find in the open file: whether its bar is showing, and its field.
     search_open: bool,
     search_input: Entity<InputState>,
+    /// Replace, in the same bar: whether its part is showing, its field, and
+    /// whether Replace all was pressed and is waiting for a yes.
+    replace_open: bool,
+    replace_input: Entity<InputState>,
+    replace_all_asked: bool,
     new_file_input: Entity<InputState>,
     rename_input: Entity<InputState>,
     suggest: Suggest,
@@ -371,6 +376,11 @@ fn delete_warning(shown: &str, folder: bool, uncommitted: usize) -> String {
     )
 }
 
+/// "1 place", "3 places".
+fn places(count: usize) -> String {
+    format!("{count} place{}", if count == 1 { "" } else { "s" })
+}
+
 /// "1 file", "3 files".
 fn files(count: usize) -> String {
     format!("{count} file{}", if count == 1 { "" } else { "s" })
@@ -410,6 +420,8 @@ impl Ide {
         let finder_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("A few letters of its name"));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Text to find"));
+        let replace_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Text to put in its place"));
         let new_file_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Name for a new file"));
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New name"));
@@ -426,6 +438,7 @@ impl Ide {
                 &search_input,
                 &new_file_input,
                 &rename_input,
+                &replace_input,
             ],
             window,
             cx,
@@ -453,6 +466,9 @@ impl Ide {
             finder_input,
             search_open: false,
             search_input,
+            replace_open: false,
+            replace_input,
+            replace_all_asked: false,
             new_file_input,
             rename_input,
             suggest: Suggest::new(),
@@ -905,7 +921,8 @@ impl Ide {
             search_input,
             new_file_input,
             rename_input,
-        ]: [&Entity<InputState>; 7],
+            replace_input,
+        ]: [&Entity<InputState>; 8],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
@@ -973,6 +990,16 @@ impl Ide {
                     }
                 },
             ),
+            cx.subscribe_in(
+                replace_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.replace_one(window, cx),
+                    // The question was about the text as it stood.
+                    InputEvent::Change => this.replace_all_asked = false,
+                    _ => {}
+                },
+            ),
         ];
         // Redraw when a field's text changes, so that what a screen reader is
         // told is in the field stays true.
@@ -984,6 +1011,7 @@ impl Ide {
             search_input,
             new_file_input,
             rename_input,
+            replace_input,
         ] {
             watching.push(cx.observe(field, |_, _, cx| cx.notify()));
         }
@@ -2464,6 +2492,8 @@ impl Ide {
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = false;
+        self.replace_open = false;
+        self.replace_all_asked = false;
         self.editor.update(cx, EditorState::close_search);
         // The field is going away. Let go of the keyboard, so that Tab moves
         // between the page's controls again.
@@ -2474,6 +2504,8 @@ impl Ide {
     /// Looks for what is typed, and shows the first place at or after what
     /// is on screen.
     fn search_changed(&mut self, cx: &mut Context<Self>) {
+        // A question about replacing was about the places found before.
+        self.replace_all_asked = false;
         let query = self.search_input.read(cx).value().to_string();
         self.editor.update(cx, |editor, cx| {
             editor.set_search_query(query, true, cx);
@@ -2510,8 +2542,140 @@ impl Ide {
         }
     }
 
+    /// Shows the replace part of the bar, ready for the new text.
+    fn open_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_open = true;
+        self.replace_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Replaces the place found that is current ("2 of 5"), and moves to the
+    /// next. The editor reports the change, which saves it like typing does.
+    fn replace_one(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_all_asked = false;
+        let with = self.replace_input.read(cx).value().to_string();
+        let replaced = self.editor.update(cx, |editor, cx| {
+            editor.replace_current_search_match(&with, window, cx)
+        });
+        if !replaced {
+            self.notice = Some("There is nothing found to replace.".to_owned());
+        }
+        cx.notify();
+    }
+
+    /// Replace all was pressed, or with `ask` false the answer was no. It
+    /// changes places that may not be on screen, so it waits for a yes.
+    fn replace_all_asked(&mut self, ask: bool, cx: &mut Context<Self>) {
+        self.replace_all_asked = ask;
+        cx.notify();
+    }
+
+    fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.replace_all_asked) {
+            return;
+        }
+        let with = self.replace_input.read(cx).value().to_string();
+        let count = self.editor.update(cx, |editor, cx| {
+            editor.replace_all_search_matches(&with, window, cx)
+        });
+        self.notice = Some(if count == 0 {
+            "There is nothing found to replace.".to_owned()
+        } else {
+            format!("Replaced {}. Undo takes that back.", places(count))
+        });
+        cx.notify();
+    }
+
+    /// Takes back the last change to the open file, or with `redo` puts back
+    /// the last one taken back. The editor does it, without being focused, so
+    /// no on-screen keyboard opens.
+    fn undo(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.editor.read(cx).focus_handle(cx);
+        if redo {
+            editor.dispatch_action(&Redo, window, cx);
+        } else {
+            editor.dispatch_action(&Undo, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The replace part of the find bar.
+    fn replace_rows(&self, found: usize, cx: &mut Context<Self>) -> Vec<Div> {
+        let field = Self::field(
+            "replace",
+            "Replace with",
+            &self.replace_input,
+            Self::typed(&self.replace_input, cx),
+        );
+        if self.replace_all_asked && found > 0 {
+            let find = Self::typed(&self.search_input, cx);
+            let with = Self::typed(&self.replace_input, cx);
+            let (question, yes) = if with.is_empty() {
+                (
+                    format!("Remove \"{find}\" from {}?", places(found)),
+                    format!("Yes, remove from {}", places(found)),
+                )
+            } else {
+                (
+                    format!("Replace \"{find}\" with \"{with}\" in {}?", places(found)),
+                    format!("Yes, replace in {}", places(found)),
+                )
+            };
+            // The question fills the row Replace all was in, so the answers
+            // sit wholly below it, and Keep comes first: a tap repeated by
+            // accident does not land on the yes.
+            return vec![
+                field,
+                Self::say("replace-question", Role::Status, question).min_h(px(TAP)),
+                h_flex()
+                    .gap_2()
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("replace-keep", "Keep as it is").primary(),
+                        |this, _, cx| this.replace_all_asked(false, cx),
+                    ))
+                    .child(Self::tap(
+                        cx,
+                        Tap::new("replace-yes", yes),
+                        Self::replace_all,
+                    )),
+            ];
+        }
+        vec![
+            field,
+            h_flex()
+                .gap_2()
+                .child(Self::tap(
+                    cx,
+                    Tap::new("replace-one", "Replace")
+                        .named("Replace this place")
+                        .disabled(found == 0),
+                    Self::replace_one,
+                ))
+                .child(Self::tap(
+                    cx,
+                    Tap::new("replace-all", "All")
+                        .named(format!("Replace all {}", places(found)))
+                        .disabled(found == 0),
+                    |this, _, cx| this.replace_all_asked(true, cx),
+                ))
+                .child(Self::tap(
+                    cx,
+                    Tap::new("undo", "Undo").named("Undo the last change"),
+                    |this, window, cx| this.undo(false, window, cx),
+                ))
+                .child(Self::tap(
+                    cx,
+                    Tap::new("redo", "Redo").named("Redo the change undone"),
+                    |this, window, cx| this.undo(true, window, cx),
+                )),
+        ]
+    }
+
     fn search_bar(&self, cx: &mut Context<Self>) -> Div {
-        let found = !self.editor.read(cx).search_session().matcher.is_empty();
+        let places_found = self.editor.read(cx).search_session().matcher.len();
+        let found = places_found > 0;
         v_flex()
             .p_2()
             .gap_2()
@@ -2553,12 +2717,24 @@ impl Ide {
                             .disabled(!found),
                         |this, _, cx| this.search_step(true, cx),
                     ))
+                    .children((!self.replace_open).then(|| {
+                        Self::tap(
+                            cx,
+                            Tap::new("replace-open", "Replace").named("Replace text"),
+                            Self::open_replace,
+                        )
+                    }))
                     .child(Self::tap(
                         cx,
                         Tap::new("search-close", "Close").named("Close find"),
                         Self::close_search,
                     )),
             )
+            .children(if self.replace_open {
+                self.replace_rows(places_found, cx)
+            } else {
+                Vec::new()
+            })
     }
 
     // ----- Finder -----
